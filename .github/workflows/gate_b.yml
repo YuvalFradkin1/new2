@@ -1,30 +1,15 @@
-name: XAR Gate B
+name: XAR Gate B Final
 on: [push]
 jobs:
   gate-b:
     runs-on: macos-latest
     steps:
-      - name: macOS version
-        run: sw_vers
-
-      - name: PackageKit — xar symbols
+      - name: strings - Installer xar references
         run: |
-          nm /System/Volumes/Data/System/Library/PrivateFrameworks/PackageKit.framework/PackageKit 2>/dev/null \
-            | grep -E "xar_extract|xar_path_issane|xar_open|xar_file" \
-            || echo "NOT FOUND / ENCRYPTED"
+          strings /System/Volumes/Data/System/Library/CoreServices/Installer.app/Contents/MacOS/Installer \
+            | grep -E "^xar_|libxar" || echo "NO XAR REFS"
 
-      - name: Installer.app — xar symbols
+      - name: strings - PackageKit xar references  
         run: |
-          nm /System/Volumes/Data/System/Library/CoreServices/Installer.app/Contents/MacOS/Installer 2>/dev/null \
-            | grep -E "xar_extract|xar_path_issane|xar_open|xar_file" \
-            || echo "NOT FOUND / ENCRYPTED"
-
-      - name: otool — PackageKit links libxar
-        run: |
-          otool -L /System/Volumes/Data/System/Library/PrivateFrameworks/PackageKit.framework/PackageKit 2>/dev/null \
-            | grep -i xar || echo "NOT FOUND"
-
-      - name: otool — Installer links libxar
-        run: |
-          otool -L /System/Volumes/Data/System/Library/CoreServices/Installer.app/Contents/MacOS/Installer 2>/dev/null \
-            | grep -i xar || echo "NOT FOUND"
+          strings /System/Volumes/Data/System/Library/PrivateFrameworks/PackageKit.framework/PackageKit \
+            | grep -E "^xar_|libxar" || echo "NO XAR REFS"
