@@ -7,14 +7,19 @@ jobs:
       - name: macOS version
         run: sw_vers
 
-      - name: libxar TBD symbols (xar_extract + xar_path_issane)
-        run: grep -E "xar_extract|xar_path_issane" /Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk/usr/lib/libxar.1.tbd
+      - name: Is xar_path_issane called FROM xar_extract in libxar?
+        run: |
+          # Extract libxar from dyld shared cache
+          dyld_shared_cache_util -extract /tmp/dyld_libs /System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_arm64e 2>/dev/null || true
+          find /tmp/dyld_libs -name "libxar*" 2>/dev/null | head -5
+          # Alternative: use dyld_info
+          dyld_info -exports /usr/lib/libxar.1.dylib 2>/dev/null | grep -E "xar_extract|xar_path_issane" || echo "dyld_info failed"
 
-      - name: PackageKit links to libxar
-        run: otool -L /System/Library/PrivateFrameworks/PackageKit.framework/PackageKit | grep -i xar || echo "NOT FOUND"
+      - name: Check xar_path_issane in libxar TBD
+        run: |
+          grep -A5 -B5 "xar_path_issane" /Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk/usr/lib/libxar.1.tbd
 
-      - name: PackageKit imports xar_extract
-        run: nm /System/Library/PrivateFrameworks/PackageKit.framework/PackageKit | grep -E "xar_extract|xar_path_issane" || echo "NOT FOUND"
-
-      - name: xar binary links to libxar
-        run: otool -L /usr/bin/xar | grep -i xar
+      - name: Find PackageKit binary alternate paths
+        run: |
+          find /System/Volumes -name "PackageKit" -not -path "*/SDK/*" 2>/dev/null | head -5
+          find /System/Volumes -name "Installer" -not -path "*/SDK/*" 2>/dev/null | head -5
