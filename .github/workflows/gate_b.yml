@@ -4,8 +4,22 @@ jobs:
   gate-b:
     runs-on: macos-latest
     steps:
-      - name: Find Installer binary
-        run: find / -name "Installer" -not -path "*/SDK/*" -not -path "*/ri/*" 2>/dev/null | grep -v "\.rb\|\.py\|Bundler\|Gem\|Plugin\|Source" | head -10
+      - name: strings - Installer
+        run: |
+          strings /System/Library/CoreServices/Installer.app/Contents/MacOS/Installer \
+            | grep -E "^xar_|libxar" || echo "NO XAR REFS"
 
-      - name: Find PackageKit binary
-        run: find / -path "*/PackageKit.framework/PackageKit" -not -path "*/SDK/*" 2>/dev/null | head -5
+      - name: strings - PackageKit
+        run: |
+          strings /System/Library/PrivateFrameworks/PackageKit.framework/PackageKit \
+            | grep -E "^xar_|libxar" || echo "NO XAR REFS"
+
+      - name: otool - Installer links libxar
+        run: |
+          otool -L /System/Library/CoreServices/Installer.app/Contents/MacOS/Installer \
+            | grep -i xar || echo "NO LIBXAR LINK"
+
+      - name: otool - PackageKit links libxar
+        run: |
+          otool -L /System/Library/PrivateFrameworks/PackageKit.framework/PackageKit \
+            | grep -i xar || echo "NO LIBXAR LINK"
