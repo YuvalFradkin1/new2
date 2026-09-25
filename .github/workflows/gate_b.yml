@@ -4,11 +4,17 @@ jobs:
   gate-b:
     runs-on: macos-latest
     steps:
-      - name: Find libxar
-        run: find /usr /Library /System -name "libxar*" 2>/dev/null || echo "NOT FOUND"
-      
-      - name: Find PackageKit
-        run: find /System /Library -name "PackageKit" -o -name "PackageKit.framework" 2>/dev/null | head -10
-      
-      - name: Find xar binary
-        run: which xar || find /usr /Library -name "xar" 2>/dev/null | head -5
+      - name: macOS version
+        run: sw_vers
+
+      - name: libxar TBD symbols (xar_extract + xar_path_issane)
+        run: grep -E "xar_extract|xar_path_issane" /Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk/usr/lib/libxar.1.tbd
+
+      - name: PackageKit links to libxar
+        run: otool -L /System/Library/PrivateFrameworks/PackageKit.framework/PackageKit | grep -i xar || echo "NOT FOUND"
+
+      - name: PackageKit imports xar_extract
+        run: nm /System/Library/PrivateFrameworks/PackageKit.framework/PackageKit | grep -E "xar_extract|xar_path_issane" || echo "NOT FOUND"
+
+      - name: xar binary links to libxar
+        run: otool -L /usr/bin/xar | grep -i xar
