@@ -4,9 +4,11 @@ jobs:
   gate-b:
     runs-on: macos-latest
     steps:
-      - name: libxar exports
-        run: nm /usr/lib/libxar.1.dylib | grep -E "xar_extract|xar_path_issane"
-      - name: PackageKit links libxar
-        run: otool -L /System/Library/PrivateFrameworks/PackageKit.framework/PackageKit | grep -i xar || echo "NOT FOUND"
-      - name: PackageKit imports xar_extract
-        run: nm /System/Library/PrivateFrameworks/PackageKit.framework/PackageKit 2>/dev/null | grep xar_extract || echo "NOT FOUND"
+      - name: Find libxar
+        run: find /usr /Library /System -name "libxar*" 2>/dev/null || echo "NOT FOUND"
+      
+      - name: Find PackageKit
+        run: find /System /Library -name "PackageKit" -o -name "PackageKit.framework" 2>/dev/null | head -10
+      
+      - name: Find xar binary
+        run: which xar || find /usr /Library -name "xar" 2>/dev/null | head -5
