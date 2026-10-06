@@ -1,0 +1,194 @@
+name: gate_a_nested_run35
+
+on:
+  workflow_dispatch:
+
+jobs:
+  gate_a_nested:
+    runs-on: macos-26
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build 3-level nested XAR archive
+        run: |
+          cc -O2 -o build_r35 build_xar_r35.c -lz
+          ./build_r35
+          ARCHIVE_SHA="$(shasum -a 256 malicious_ga.xar | awk '{print $1}')"
+          echo "archive_sha256=$ARCHIVE_SHA" >> "$GITHUB_ENV"
+          cp malicious_ga.xar /tmp/malicious_r35.xar
+          echo "archive_sha256: $ARCHIVE_SHA  /tmp/malicious_r35.xar"
+
+          echo "=== XAR TABLE OF CONTENTS (xar -tv) ==="
+          /usr/bin/xar -tv /tmp/malicious_r35.xar 2>&1 || echo "(xar -tv failed)"
+          echo "=== END TOC ==="
+
+      - name: System info
+        run: |
+          echo "=== macOS version ==="
+          sw_vers
+          echo "=== system xar ==="
+          ls -la /usr/bin/xar
+          otool -L /usr/bin/xar | grep libxar
+
+      - name: GATE A - xar CLI (isolated)
+        run: |
+          LOG="/tmp/run35_xar.log"
+          CANARY="/tmp/xar_gated_canary_macos.txt"
+          EXTRACT_DIR="$(mktemp -d /tmp/gate_a35_sysxar.XXXXXX)"
+          GATE_RESULT="$(mktemp)"
+          echo "FAIL" > "$GATE_RESULT"
+
+          {
+            echo "=== GATE A xar — PRE-CHECK ==="
+            rm -f "$CANARY"
+            if [ -e "$CANARY" ]; then
+              echo "ABORT: canary not removable before xar test"
+              echo "ABORT" > "$GATE_RESULT"
+              exit 1
+            fi
+            echo "PRE_XAR=ABSENT"
+
+            echo "=== GATE A xar — EXTRACT ==="
+            ls -la "$EXTRACT_DIR"
+            if /usr/bin/xar -xf /tmp/malicious_r35.xar -C "$EXTRACT_DIR" 2>&1; then
+              XAR_EXIT=0
+            else
+              XAR_EXIT=$?
+            fi
+            echo "xar exit code: $XAR_EXIT"
+
+            echo "=== extraction dir after xar (recursive) ==="
+            ls -laR "$EXTRACT_DIR/"
+
+            echo "=== SYMLINK CHECK ==="
+            if [ -L "$EXTRACT_DIR/d/link_to_tmp" ]; then
+              echo "SYMLINK: d/link_to_tmp -> $(readlink "$EXTRACT_DIR/d/link_to_tmp")"
+            else
+              echo "NO symlink found at d/link_to_tmp"
+            fi
+
+            echo "=== CANARY SEARCH (find anywhere in /tmp) ==="
+            find /tmp /private/tmp -name "xar_gated_canary_macos.txt" 2>/dev/null \
+              | head -10 || echo "(not found anywhere)"
+
+            echo "=== GATE A xar — CANARY CHECK ==="
+            if [ -f "$CANARY" ]; then
+              ls -la "$CANARY"
+              echo "PRESENT"
+              echo "Contents: $(cat "$CANARY")"
+              echo "GATE_A_SYSXAR=PASS"
+              echo "PASS" > "$GATE_RESULT"
+            else
+              echo "ABSENT"
+              echo "GATE_A_SYSXAR=FAIL"
+            fi
+
+            echo "=== GATE A xar — CLEANUP ==="
+            rm -f "$CANARY"
+            rm -rf "$EXTRACT_DIR"
+            echo "POST_XAR=CLEANED"
+          } 2>&1 | tee "$LOG"
+
+          RESULT="$(cat "$GATE_RESULT")"
+          rm -f "$GATE_RESULT"
+          if [ "$RESULT" != "PASS" ]; then
+            echo "Step failing: GATE_A_SYSXAR=FAIL or ABORT"
+            exit 1
+          fi
+
+      - name: GATE A - pkgutil (isolated)
+        run: |
+          LOG="/tmp/run35_pkgutil.log"
+          CANARY="/tmp/xar_gated_canary_macos.txt"
+          PKGUTIL_DIR="$(mktemp -d /tmp/gate_a35_pkgutil.XXXXXX)"
+          GATE_RESULT="$(mktemp)"
+          echo "FAIL" > "$GATE_RESULT"
+
+          {
+            echo "=== GATE A pkgutil — PRE-CHECK ==="
+            rm -f "$CANARY"
+            if [ -e "$CANARY" ]; then
+              echo "ABORT: canary not removable before pkgutil test"
+              echo "ABORT" > "$GATE_RESULT"
+              exit 1
+            fi
+            echo "PRE_PKGUTIL=ABSENT"
+
+            echo "=== GATE A pkgutil — EXPAND ==="
+            if pkgutil --expand /tmp/malicious_r35.xar "$PKGUTIL_DIR/out" 2>&1; then
+              PKGUTIL_EXIT=0
+            else
+              PKGUTIL_EXIT=$?
+            fi
+            echo "pkgutil exit code: $PKGUTIL_EXIT"
+
+            echo "=== pkgutil dir after expand (recursive) ==="
+            ls -laR "$PKGUTIL_DIR/"
+
+            echo "=== CANARY SEARCH (find anywhere in /tmp) ==="
+            find /tmp /private/tmp -name "xar_gated_canary_macos.txt" 2>/dev/null \
+              | head -10 || echo "(not found anywhere)"
+
+            echo "=== GATE A pkgutil — CANARY CHECK ==="
+            if [ -f "$CANARY" ]; then
+              ls -la "$CANARY"
+              echo "PRESENT"
+              echo "Contents: $(cat "$CANARY")"
+              echo "GATE_A_PKGUTIL=PASS"
+              echo "PASS" > "$GATE_RESULT"
+            else
+              echo "ABSENT"
+              echo "GATE_A_PKGUTIL=FAIL"
+            fi
+
+            echo "=== GATE A pkgutil — CLEANUP ==="
+            rm -f "$CANARY"
+            rm -rf "$PKGUTIL_DIR"
+            echo "POST_PKGUTIL=CLEANED"
+          } 2>&1 | tee "$LOG"
+
+          RESULT="$(cat "$GATE_RESULT")"
+          rm -f "$GATE_RESULT"
+          if [ "$RESULT" != "PASS" ]; then
+            echo "Step failing: GATE_A_PKGUTIL=FAIL or ABORT"
+            exit 1
+          fi
+
+      - name: Collect and push results
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo "=== RUN 35 RESULTS — 3-Level Nested Gate A (macos-26) ==="
+            echo "date: $(date)"
+            echo "macos_version: $(sw_vers -productVersion)"
+            echo "macos_build: $(sw_vers -buildVersion)"
+            echo "xar_binary: $(ls -la /usr/bin/xar)"
+            echo "libxar: $(otool -L /usr/bin/xar | grep libxar)"
+            echo "archive_sha256: ${{ env.archive_sha256 }}  /tmp/malicious_r35.xar"
+            echo ""
+            echo "--- XAR TABLE OF CONTENTS ---"
+            /usr/bin/xar -tv /tmp/malicious_r35.xar 2>&1 || echo "(xar -tv failed)"
+            echo ""
+            echo "--- GATE A xar output ---"
+            cat /tmp/run35_xar.log || echo "(log missing)"
+            echo ""
+            echo "--- GATE A pkgutil output ---"
+            cat /tmp/run35_pkgutil.log || echo "(log missing)"
+          } > run35_results.log
+
+          git config user.email "actions@github.com"
+          git config user.name "GitHub Actions"
+          git add run35_results.log
+          git commit -m "Run 35 results — 3-level nested Gate A macos-26 [ci skip]" || echo "(nothing to commit)"
+          git push || echo "(push failed)"
+
+      - name: Upload Run 35 artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run35-gate-a-3level-macos26
+          path: run35_results.log
+          retention-days: 90
