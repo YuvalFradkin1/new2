@@ -1,0 +1,139 @@
+name: gate_b_run2
+
+on:
+  workflow_dispatch:
+
+jobs:
+  gate_b_r2:
+    runs-on: macos-15
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: macOS version
+        run: sw_vers
+
+      - name: Gate B Run 2 — dlopen probe for xar symbols in PackageKit
+        run: |
+          cat > /tmp/gate_b_probe.c << 'EOF'
+          #include <stdio.h>
+          #include <dlfcn.h>
+          #include <string.h>
+
+          #define PK_PATH "/System/Library/PrivateFrameworks/PackageKit.framework/Versions/A/PackageKit"
+
+          static const char *SYM[] = {
+              "xar_open", "xar_close", "xar_extract",
+              "xar_iter_new", "xar_file_first", "xar_file_next", "xar_iter_free",
+              "xar_file_get_prop", "xar_prop_get",
+              NULL
+          };
+
+          int main(void) {
+              void *h = dlopen(PK_PATH, RTLD_LAZY | RTLD_LOCAL);
+              if (!h) { fprintf(stderr,"dlopen: %s\n",dlerror()); return 1; }
+              int found = 0, missing = 0;
+              for (int i = 0; SYM[i]; i++) {
+                  void *sym = dlsym(h, SYM[i]);
+                  printf("[%c] %s @ %p\n", sym?'+':'-', SYM[i], sym);
+                  if (sym) found++; else missing++;
+              }
+              dlclose(h);
+              printf("\n[GATE B] PackageKit xar symbols: %d found, %d missing\n", found, missing);
+              if (found >= 7) {
+                  printf("[!] GATE B PASS: PackageKit embeds libxar (>= 7 symbols)\n");
+                  return 0;
+              }
+              printf("[-] GATE B FAIL: insufficient symbols\n");
+              return 1;
+          }
+          EOF
+          cc -O2 -o /tmp/gate_b_probe /tmp/gate_b_probe.c
+          /tmp/gate_b_probe
+          echo "GATE_B_DLOPEN_RC=$?"
+
+      - name: Gate B Run 2 — check Installer.app xar surface
+        run: |
+          cat > /tmp/gate_b_installer.c << 'EOF'
+          #include <stdio.h>
+          #include <dlfcn.h>
+
+          #define INSTALLER_PATH \
+            "/System/Library/CoreServices/Installer.app/Contents/MacOS/Installer"
+
+          static const char *SYM[] = {
+              "xar_open", "xar_extract", "xar_iter_new",
+              NULL
+          };
+
+          int main(void) {
+              void *h = dlopen(INSTALLER_PATH, RTLD_LAZY | RTLD_LOCAL);
+              if (!h) { printf("dlopen Installer: %s\n", dlerror()); return 1; }
+              int found = 0;
+              for (int i = 0; SYM[i]; i++) {
+                  void *sym = dlsym(h, SYM[i]);
+                  printf("[%c] %s\n", sym?'+':'-', SYM[i]);
+                  if (sym) found++;
+              }
+              dlclose(h);
+              printf("[GATE B] Installer xar symbols found: %d\n", found);
+              return (found > 0) ? 0 : 1;
+          }
+          EOF
+          cc -O2 -o /tmp/gate_b_installer /tmp/gate_b_installer.c
+          /tmp/gate_b_installer || echo "(Installer probe done)"
+
+      - name: Gate B Run 2 — check dyld shared cache for libxar
+        run: |
+          echo "=== dyld-info on PackageKit (xar symbols) ==="
+          dyld_info -exports \
+            /System/Library/PrivateFrameworks/PackageKit.framework/Versions/A/PackageKit \
+            2>/dev/null | grep -i xar | head -20 || echo "(dyld_info unavailable or no matches)"
+          echo "=== otool -L extended PackageKit ==="
+          otool -L /System/Library/PrivateFrameworks/PackageKit.framework/Versions/A/PackageKit \
+            | head -30
+          echo "=== PackageKit binary size ==="
+          ls -la /System/Library/PrivateFrameworks/PackageKit.framework/Versions/A/PackageKit
+
+      - name: Gate B Run 2 — collect and push results
+        if: always()
+        run: |
+          cd $GITHUB_WORKSPACE
+          {
+            echo "=== GATE B RUN 2 RESULTS ==="
+            echo "date: $(date -u)"
+            echo ""
+            echo "=== macOS version ==="
+            sw_vers
+            echo ""
+            echo "=== dlopen probe: PackageKit ==="
+            /tmp/gate_b_probe 2>&1
+            echo ""
+            echo "=== dlopen probe: Installer ==="
+            /tmp/gate_b_installer 2>&1 || echo "(Installer probe done)"
+            echo ""
+            echo "=== dyld-info PackageKit xar ==="
+            dyld_info -exports \
+              /System/Library/PrivateFrameworks/PackageKit.framework/Versions/A/PackageKit \
+              2>/dev/null | grep -i xar | head -20 || echo "(dyld_info no matches)"
+            echo ""
+            echo "=== GATE B VERDICT ==="
+            /tmp/gate_b_probe 2>&1 | grep -E "GATE B|PASS|FAIL" | tail -3
+          } > gate_b_run2_results.log
+          cat gate_b_run2_results.log
+          git config user.email "ci@gate-b"
+          git config user.name "Gate B CI"
+          git add gate_b_run2_results.log
+          git commit -m "Gate B Run 2 results [ci skip]" || echo "(nothing to commit)"
+          git push https://YuvalFradkin1:REDACTED_PAT@github.com/YuvalFradkin1/xar-symlink2-repro.git HEAD:main
+
+      - name: Upload Gate B Run 2 artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-b-run2-evidence
+          path: gate_b_run2_results.log
+          retention-days: 30

@@ -1,25 +1,103 @@
-name: XAR Gate B Final
-on: [push]
+name: gate_b_run1
+
+on:
+  workflow_dispatch:
+
 jobs:
-  gate-b:
-    runs-on: macos-latest
+  gate_b:
+    runs-on: macos-15
+    permissions:
+      contents: write
+
     steps:
-      - name: strings - Installer
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: macOS version
+        run: sw_vers
+
+      - name: Gate B - strings Installer.app for xar symbols
         run: |
+          echo "=== strings Installer for xar_ ==="
           strings /System/Library/CoreServices/Installer.app/Contents/MacOS/Installer \
-            | grep -E "^xar_|libxar" || echo "NO XAR REFS"
+            | grep -E "xar_|libxar" | head -30 || echo "NO XAR REFS"
 
-      - name: strings - PackageKit
+      - name: Gate B - strings PackageKit for xar symbols
         run: |
-          strings /System/Library/PrivateFrameworks/PackageKit.framework/PackageKit \
-            | grep -E "^xar_|libxar" || echo "NO XAR REFS"
+          echo "=== strings PackageKit for xar_ ==="
+          strings /System/Library/PrivateFrameworks/PackageKit.framework/Versions/A/PackageKit \
+            | grep -E "xar_|libxar" | head -30 || echo "NO XAR REFS"
 
-      - name: otool - Installer links libxar
+      - name: Gate B - otool Installer links libxar
         run: |
+          echo "=== otool -L Installer ==="
           otool -L /System/Library/CoreServices/Installer.app/Contents/MacOS/Installer \
             | grep -i xar || echo "NO LIBXAR LINK"
 
-      - name: otool - PackageKit links libxar
+      - name: Gate B - otool PackageKit links libxar
         run: |
-          otool -L /System/Library/PrivateFrameworks/PackageKit.framework/PackageKit \
+          echo "=== otool -L PackageKit ==="
+          otool -L /System/Library/PrivateFrameworks/PackageKit.framework/Versions/A/PackageKit \
             | grep -i xar || echo "NO LIBXAR LINK"
+
+      - name: Gate B - nm xar exports from PackageKit
+        run: |
+          echo "=== nm xar in PackageKit ==="
+          nm -gU /System/Library/PrivateFrameworks/PackageKit.framework/Versions/A/PackageKit \
+            2>/dev/null | grep -i xar | head -30 || echo "(none)"
+
+      - name: Gate B - locate system libxar dylib
+        run: |
+          echo "=== find libxar in system ==="
+          find /usr/lib /System/Library /Library -name "*xar*" 2>/dev/null | head -20
+          echo "=== dyld shared cache ==="
+          ls /private/var/db/dyld/ 2>/dev/null | head -5
+
+      - name: Gate B - collect and push results
+        if: always()
+        run: |
+          cd $GITHUB_WORKSPACE
+          {
+            echo "=== GATE B RUN 1 RESULTS ==="
+            echo "date: $(date -u)"
+            echo ""
+            echo "=== macOS version ==="
+            sw_vers
+            echo ""
+            echo "=== STRINGS Installer for xar_ ==="
+            strings /System/Library/CoreServices/Installer.app/Contents/MacOS/Installer \
+              | grep -E "xar_|libxar" | head -30 || echo "NO XAR REFS"
+            echo ""
+            echo "=== STRINGS PackageKit for xar_ ==="
+            strings /System/Library/PrivateFrameworks/PackageKit.framework/Versions/A/PackageKit \
+              | grep -E "xar_|libxar" | head -30 || echo "NO XAR REFS"
+            echo ""
+            echo "=== OTOOL Installer ==="
+            otool -L /System/Library/CoreServices/Installer.app/Contents/MacOS/Installer \
+              | grep -i xar || echo "NO LIBXAR LINK"
+            echo ""
+            echo "=== OTOOL PackageKit ==="
+            otool -L /System/Library/PrivateFrameworks/PackageKit.framework/Versions/A/PackageKit \
+              | grep -i xar || echo "NO LIBXAR LINK"
+            echo ""
+            echo "=== NM PackageKit xar exports ==="
+            nm -gU /System/Library/PrivateFrameworks/PackageKit.framework/Versions/A/PackageKit \
+              2>/dev/null | grep -i xar | head -30 || echo "(none)"
+            echo ""
+            echo "=== FIND libxar ==="
+            find /usr/lib /System/Library /Library -name "*xar*" 2>/dev/null | head -20
+          } > gate_b_run1_results.log
+          cat gate_b_run1_results.log
+          git config user.email "ci@gate-b"
+          git config user.name "Gate B CI"
+          git add gate_b_run1_results.log
+          git commit -m "Gate B Run 1 results [ci skip]" || echo "(nothing to commit)"
+          git push https://YuvalFradkin1:REDACTED_PAT@github.com/YuvalFradkin1/xar-symlink2-repro.git HEAD:main
+
+      - name: Upload Gate B artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-b-run1-evidence
+          path: gate_b_run1_results.log
+          retention-days: 30
