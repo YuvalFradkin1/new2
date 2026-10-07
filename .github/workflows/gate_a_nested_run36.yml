@@ -17,7 +17,6 @@ jobs:
           ARCHIVE_SHA="$(shasum -a 256 malicious_ga.xar | awk '{print $1}')"
           echo "archive_sha256=$ARCHIVE_SHA" >> "$GITHUB_ENV"
           cp malicious_ga.xar /tmp/malicious_r36.xar
-
           echo "=== XAR TABLE OF CONTENTS (xar -tv) ==="
           /usr/bin/xar -tv /tmp/malicious_r36.xar 2>&1 || echo "(xar -tv failed)"
           echo "=== END TOC ==="
@@ -30,75 +29,40 @@ jobs:
 
       - name: DIAGNOSTIC - symlink write tests
         run: |
-          # Definitively answer: can the OS write through d/link_to_tmp/file?
-          # If YES from shell but NO from xar → xar has an internal block (O_NOFOLLOW_ANY or lstat check).
-          # If NO from shell → OS itself is blocking it.
-
           DIAG_DIR="$(mktemp -d /tmp/diag_r36.XXXXXX)"
           mkdir -p "$DIAG_DIR/d"
           ln -sf /tmp "$DIAG_DIR/d/link_to_tmp"
-          echo "=== symlink created: $(ls -la $DIAG_DIR/d/link_to_tmp) ==="
+          echo "=== symlink: $(ls -la $DIAG_DIR/d/link_to_tmp) ==="
 
-          # Test 1: shell write through symlink (no special flags)
-          echo "=== TEST 1: shell write through symlink ==="
-          if echo "shell_test_content" > "$DIAG_DIR/d/link_to_tmp/diag_shell_test.txt" 2>&1; then
-            SHELL_EXIT=0
-          else
-            SHELL_EXIT=$?
-          fi
-          echo "shell write exit: $SHELL_EXIT"
+          # Test 1: shell write through symlink
+          echo "=== TEST 1: shell write ==="
+          if echo "shell_test" > "$DIAG_DIR/d/link_to_tmp/diag_shell_test.txt" 2>&1; then SEXIT=0; else SEXIT=$?; fi
           if [ -f /tmp/diag_shell_test.txt ] || [ -f /private/tmp/diag_shell_test.txt ]; then
-            echo "SHELL_WRITE=SUCCESS (file landed in /tmp)"
-            rm -f /tmp/diag_shell_test.txt /private/tmp/diag_shell_test.txt
+            echo "SHELL_WRITE=SUCCESS"; rm -f /tmp/diag_shell_test.txt /private/tmp/diag_shell_test.txt
           else
-            echo "SHELL_WRITE=FAIL (file NOT in /tmp)"
+            echo "SHELL_WRITE=FAIL (exit=$SEXIT)"
           fi
 
-          # Test 2: Python open() without any extra flags
-          echo "=== TEST 2: Python open() no-flags through symlink ==="
-          python3 - "$DIAG_DIR" << 'PYEOF'
-import os, sys
-diag = sys.argv[1]
-path = diag + "/d/link_to_tmp/diag_py_noflag.txt"
-try:
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    os.write(fd, b"py_noflag_content\n")
-    os.close(fd)
-    print("PY_NOFLAG_WRITE=SUCCESS")
-except OSError as e:
-    print(f"PY_NOFLAG_WRITE=FAIL errno={e.errno} ({e.strerror})")
-PYEOF
+          # Test 2: Python os.open() no extra flags
+          echo "=== TEST 2: Python no-flags ==="
+          python3 -c $'import os,sys\ndiag=sys.argv[1]\npath=diag+"/d/link_to_tmp/diag_py_noflag.txt"\ntry:\n    fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)\n    os.write(fd,b"noflag")\n    os.close(fd)\n    print("PY_NOFLAG_WRITE=SUCCESS")\nexcept OSError as e:\n    print("PY_NOFLAG_WRITE=FAIL errno={} ({})".format(e.errno,e.strerror))' "$DIAG_DIR"
           if [ -f /tmp/diag_py_noflag.txt ] || [ -f /private/tmp/diag_py_noflag.txt ]; then
-            echo "PY_NOFLAG: file confirmed in /tmp"
-            rm -f /tmp/diag_py_noflag.txt /private/tmp/diag_py_noflag.txt
+            echo "PY_NOFLAG: confirmed in /tmp"; rm -f /tmp/diag_py_noflag.txt /private/tmp/diag_py_noflag.txt
           else
-            echo "PY_NOFLAG: file NOT in /tmp"
+            echo "PY_NOFLAG: NOT in /tmp"
           fi
 
-          # Test 3: Python open() WITH O_NOFOLLOW_ANY (0x20000000 on macOS)
-          echo "=== TEST 3: Python open() with O_NOFOLLOW_ANY through symlink ==="
-          python3 - "$DIAG_DIR" << 'PYEOF'
-import os, sys
-diag = sys.argv[1]
-path = diag + "/d/link_to_tmp/diag_py_nofollow_any.txt"
-O_NOFOLLOW_ANY = 0x20000000  # macOS constant
-try:
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | O_NOFOLLOW_ANY, 0o600)
-    os.write(fd, b"should_not_exist\n")
-    os.close(fd)
-    print("PY_NOFOLLOW_ANY=did_NOT_block (symlink traversal would succeed even with flag)")
-except OSError as e:
-    print(f"PY_NOFOLLOW_ANY=blocked errno={e.errno} ({e.strerror})")
-PYEOF
+          # Test 3: Python os.open() WITH O_NOFOLLOW_ANY (0x20000000)
+          echo "=== TEST 3: Python O_NOFOLLOW_ANY ==="
+          python3 -c $'import os,sys\ndiag=sys.argv[1]\npath=diag+"/d/link_to_tmp/diag_py_nfa.txt"\nO_NFA=0x20000000\ntry:\n    fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_TRUNC|O_NFA,0o600)\n    os.write(fd,b"nfa")\n    os.close(fd)\n    print("PY_NOFOLLOW_ANY=did_NOT_block")\nexcept OSError as e:\n    print("PY_NOFOLLOW_ANY=blocked errno={} ({})".format(e.errno,e.strerror))' "$DIAG_DIR"
 
-          # Test 4: xar -xvf verbose — does it mention id=3 at all?
-          echo "=== TEST 4: xar -xvf verbose on the archive ==="
-          XAR_VERBOSE_DIR="$(mktemp -d /tmp/diag_r36_xarvv.XXXXXX)"
-          /usr/bin/xar -xvf /tmp/malicious_r36.xar -C "$XAR_VERBOSE_DIR" 2>&1 || true
-          echo "xar verbose exit: $?"
-          echo "=== extraction dir after verbose xar ==="
-          ls -laR "$XAR_VERBOSE_DIR/"
-          rm -rf "$XAR_VERBOSE_DIR"
+          # Test 4: xar -xvf verbose
+          echo "=== TEST 4: xar -xvf verbose ==="
+          XVD="$(mktemp -d /tmp/diag_r36_xvf.XXXXXX)"
+          /usr/bin/xar -xvf /tmp/malicious_r36.xar -C "$XVD" 2>&1 || true
+          echo "--- tree after verbose xar ---"
+          ls -laR "$XVD/"
+          rm -rf "$XVD"
 
           rm -rf "$DIAG_DIR"
 
@@ -106,106 +70,56 @@ PYEOF
         run: |
           LOG="/tmp/run36_xar.log"
           CANARY="/tmp/xar_gated_canary_macos.txt"
-          EXTRACT_DIR="$(mktemp -d /tmp/gate_a36_sysxar.XXXXXX)"
-          GATE_RESULT="$(mktemp)"
-          echo "FAIL" > "$GATE_RESULT"
-
+          EDIR="$(mktemp -d /tmp/gate_a36_sysxar.XXXXXX)"
+          GR="$(mktemp)"; echo "FAIL" > "$GR"
           {
-            echo "=== GATE A xar — PRE-CHECK ==="
+            echo "=== GATE A xar PRE-CHECK ==="
             rm -f "$CANARY"
-            if [ -e "$CANARY" ]; then
-              echo "ABORT: canary not removable"
-              echo "ABORT" > "$GATE_RESULT"
-              exit 1
-            fi
+            [ -e "$CANARY" ] && { echo "ABORT"; echo "ABORT" > "$GR"; exit 1; }
             echo "PRE_XAR=ABSENT"
-
-            echo "=== GATE A xar — EXTRACT ==="
-            if /usr/bin/xar -xf /tmp/malicious_r36.xar -C "$EXTRACT_DIR" 2>&1; then
-              XAR_EXIT=0
-            else
-              XAR_EXIT=$?
-            fi
-            echo "xar exit code: $XAR_EXIT"
-
-            echo "=== extraction dir (recursive) ==="
-            ls -laR "$EXTRACT_DIR/"
-
+            echo "=== GATE A xar EXTRACT ==="
+            /usr/bin/xar -xf /tmp/malicious_r36.xar -C "$EDIR" 2>&1; XE=$?
+            echo "xar exit: $XE"
+            ls -laR "$EDIR/"
             echo "=== CANARY SEARCH ==="
-            find /tmp /private/tmp -name "xar_gated_canary_macos.txt" 2>/dev/null \
-              | head -10 || echo "(not found)"
-
-            echo "=== GATE A xar — CANARY CHECK ==="
+            find /tmp /private/tmp -name "xar_gated_canary_macos.txt" 2>/dev/null | head -10 || echo "(not found)"
             if [ -f "$CANARY" ]; then
-              echo "PRESENT: $(cat $CANARY)"
-              echo "GATE_A_SYSXAR=PASS"
-              echo "PASS" > "$GATE_RESULT"
+              echo "PRESENT: $(cat $CANARY)"; echo "GATE_A_SYSXAR=PASS"; echo "PASS" > "$GR"
             else
-              echo "ABSENT"
-              echo "GATE_A_SYSXAR=FAIL"
+              echo "ABSENT"; echo "GATE_A_SYSXAR=FAIL"
             fi
-
-            rm -f "$CANARY"; rm -rf "$EXTRACT_DIR"
+            rm -f "$CANARY"; rm -rf "$EDIR"
           } 2>&1 | tee "$LOG"
-
-          RESULT="$(cat "$GATE_RESULT")"; rm -f "$GATE_RESULT"
-          if [ "$RESULT" != "PASS" ]; then
-            echo "Step failing: GATE_A_SYSXAR=FAIL"
-            exit 1
-          fi
+          RES="$(cat "$GR")"; rm -f "$GR"
+          [ "$RES" = "PASS" ] || { echo "Step failing: GATE_A_SYSXAR=FAIL"; exit 1; }
 
       - name: GATE A - pkgutil (always runs)
         if: always()
         run: |
           LOG="/tmp/run36_pkgutil.log"
           CANARY="/tmp/xar_gated_canary_macos.txt"
-          PKGUTIL_DIR="$(mktemp -d /tmp/gate_a36_pkgutil.XXXXXX)"
-          GATE_RESULT="$(mktemp)"
-          echo "FAIL" > "$GATE_RESULT"
-
+          PDIR="$(mktemp -d /tmp/gate_a36_pkgutil.XXXXXX)"
+          GR="$(mktemp)"; echo "FAIL" > "$GR"
           {
-            echo "=== GATE A pkgutil — PRE-CHECK ==="
+            echo "=== GATE A pkgutil PRE-CHECK ==="
             rm -f "$CANARY"
-            if [ -e "$CANARY" ]; then
-              echo "ABORT: canary not removable"
-              echo "ABORT" > "$GATE_RESULT"
-              exit 1
-            fi
+            [ -e "$CANARY" ] && { echo "ABORT"; echo "ABORT" > "$GR"; exit 1; }
             echo "PRE_PKGUTIL=ABSENT"
-
-            echo "=== GATE A pkgutil — EXPAND ==="
-            if pkgutil --expand /tmp/malicious_r36.xar "$PKGUTIL_DIR/out" 2>&1; then
-              PKGUTIL_EXIT=0
-            else
-              PKGUTIL_EXIT=$?
-            fi
-            echo "pkgutil exit code: $PKGUTIL_EXIT"
-
-            echo "=== pkgutil dir (recursive) ==="
-            ls -laR "$PKGUTIL_DIR/"
-
+            echo "=== GATE A pkgutil EXPAND ==="
+            pkgutil --expand /tmp/malicious_r36.xar "$PDIR/out" 2>&1; PE=$?
+            echo "pkgutil exit: $PE"
+            ls -laR "$PDIR/"
             echo "=== CANARY SEARCH ==="
-            find /tmp /private/tmp -name "xar_gated_canary_macos.txt" 2>/dev/null \
-              | head -10 || echo "(not found)"
-
-            echo "=== GATE A pkgutil — CANARY CHECK ==="
+            find /tmp /private/tmp -name "xar_gated_canary_macos.txt" 2>/dev/null | head -10 || echo "(not found)"
             if [ -f "$CANARY" ]; then
-              echo "PRESENT: $(cat $CANARY)"
-              echo "GATE_A_PKGUTIL=PASS"
-              echo "PASS" > "$GATE_RESULT"
+              echo "PRESENT: $(cat $CANARY)"; echo "GATE_A_PKGUTIL=PASS"; echo "PASS" > "$GR"
             else
-              echo "ABSENT"
-              echo "GATE_A_PKGUTIL=FAIL"
+              echo "ABSENT"; echo "GATE_A_PKGUTIL=FAIL"
             fi
-
-            rm -f "$CANARY"; rm -rf "$PKGUTIL_DIR"
+            rm -f "$CANARY"; rm -rf "$PDIR"
           } 2>&1 | tee "$LOG"
-
-          RESULT="$(cat "$GATE_RESULT")"; rm -f "$GATE_RESULT"
-          if [ "$RESULT" != "PASS" ]; then
-            echo "Step failing: GATE_A_PKGUTIL=FAIL"
-            exit 1
-          fi
+          RES="$(cat "$GR")"; rm -f "$GR"
+          [ "$RES" = "PASS" ] || { echo "Step failing: GATE_A_PKGUTIL=FAIL"; exit 1; }
 
       - name: Collect and push results
         if: always()
@@ -219,7 +133,7 @@ PYEOF
             echo "macos_build: $(sw_vers -buildVersion)"
             echo "xar_binary: $(ls -la /usr/bin/xar)"
             echo "libxar: $(otool -L /usr/bin/xar | grep libxar)"
-            echo "archive_sha256: ${{ env.archive_sha256 }}  /tmp/malicious_r36.xar"
+            echo "archive_sha256: ${{ env.archive_sha256 }}"
             echo ""
             echo "--- XAR TABLE OF CONTENTS ---"
             /usr/bin/xar -tv /tmp/malicious_r36.xar 2>&1 || echo "(xar -tv failed)"
@@ -230,14 +144,13 @@ PYEOF
             echo "--- GATE A pkgutil output ---"
             cat /tmp/run36_pkgutil.log 2>/dev/null || echo "(log missing)"
           } > run36_results.log
-
           git config user.email "actions@github.com"
           git config user.name "GitHub Actions"
           git add run36_results.log
-          git commit -m "Run 36 results — diagnostic + Gate A macos-26 [ci skip]" || echo "(nothing to commit)"
+          git commit -m "Run 36 results [ci skip]" || echo "(nothing to commit)"
           git push || echo "(push failed)"
 
-      - name: Upload Run 36 artifact
+      - name: Upload artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:

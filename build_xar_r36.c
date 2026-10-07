@@ -5,24 +5,21 @@
  *   id=1  DIRECTORY "d"
  *     id=2  SYMLINK  "link_to_tmp" -> /tmp
  *       id=3  FILE   "xar_gated_canary_macos.txt"   (child of SYMLINK)
- *
- * Run 35 result: id=1 and id=2 extracted, id=3 silently absent.
- * Run 36 goal: diagnose WHY — manual shell write test + xar -xvf verbose.
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include <arpa/inet.h>
-#include <zlib.h>
 #include <CommonCrypto/CommonDigest.h>
+#include <zlib.h>
 
-#define XAR_MAGIC      0x78617221
+#define XAR_MAGIC    0x78617221u
 #define XAR_CKSUM_SHA1 1
 
 static void compress_buf(const unsigned char *in, size_t inlen,
                          unsigned char **out, size_t *outlen) {
-    *outlen = compressBound(inlen) + 64;
+    *outlen = compressBound((uLong)inlen) + 64;
     *out = malloc(*outlen);
     z_stream s = {0};
     deflateInit2(&s, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 15, 8, Z_DEFAULT_STRATEGY);
