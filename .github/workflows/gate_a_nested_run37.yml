@@ -1,0 +1,130 @@
+name: gate_a_nested_run37
+
+on:
+  workflow_dispatch:
+
+jobs:
+  gate_a_nested:
+    runs-on: macos-26
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build slash-in-name XAR archive
+        run: |
+          cc -O2 -o build_r37 build_xar_r37.c -lz
+          ./build_r37
+          ARCHIVE_SHA="$(shasum -a 256 malicious_ga.xar | awk '{print $1}')"
+          echo "archive_sha256=$ARCHIVE_SHA" >> "$GITHUB_ENV"
+          cp malicious_ga.xar /tmp/malicious_r37.xar
+          echo "=== XAR TABLE OF CONTENTS ==="
+          /usr/bin/xar -tv /tmp/malicious_r37.xar 2>&1 || echo "(xar -tv failed)"
+          echo "=== END TOC ==="
+
+      - name: System info
+        run: |
+          sw_vers
+          ls -la /usr/bin/xar
+          otool -L /usr/bin/xar | grep libxar
+
+      - name: GATE A - xar CLI (isolated)
+        run: |
+          LOG="/tmp/run37_xar.log"
+          CANARY="/tmp/xar_gated_canary_macos.txt"
+          EDIR="$(mktemp -d /tmp/gate_a37_sysxar.XXXXXX)"
+          GR="$(mktemp)"; echo "FAIL" > "$GR"
+          {
+            echo "=== GATE A xar PRE-CHECK ==="
+            rm -f "$CANARY"
+            [ -e "$CANARY" ] && { echo "ABORT"; echo "ABORT" > "$GR"; exit 1; }
+            echo "PRE_XAR=ABSENT"
+
+            echo "=== GATE A xar EXTRACT ==="
+            /usr/bin/xar -xf /tmp/malicious_r37.xar -C "$EDIR" 2>&1; XE=$?
+            echo "xar exit: $XE"
+
+            echo "=== extraction dir ==="
+            ls -laR "$EDIR/"
+
+            echo "=== CANARY SEARCH ==="
+            find /tmp /private/tmp -name "xar_gated_canary_macos.txt" 2>/dev/null | head -10 || echo "(not found)"
+
+            if [ -f "$CANARY" ]; then
+              echo "PRESENT: $(cat $CANARY)"; echo "GATE_A_SYSXAR=PASS"; echo "PASS" > "$GR"
+            else
+              echo "ABSENT"; echo "GATE_A_SYSXAR=FAIL"
+            fi
+            rm -f "$CANARY"; rm -rf "$EDIR"
+          } 2>&1 | tee "$LOG"
+          RES="$(cat "$GR")"; rm -f "$GR"
+          [ "$RES" = "PASS" ] || { echo "Step failing: GATE_A_SYSXAR=FAIL"; exit 1; }
+
+      - name: GATE A - pkgutil (always runs)
+        if: always()
+        run: |
+          LOG="/tmp/run37_pkgutil.log"
+          CANARY="/tmp/xar_gated_canary_macos.txt"
+          PDIR="$(mktemp -d /tmp/gate_a37_pkgutil.XXXXXX)"
+          GR="$(mktemp)"; echo "FAIL" > "$GR"
+          {
+            echo "=== GATE A pkgutil PRE-CHECK ==="
+            rm -f "$CANARY"
+            [ -e "$CANARY" ] && { echo "ABORT"; echo "ABORT" > "$GR"; exit 1; }
+            echo "PRE_PKGUTIL=ABSENT"
+
+            echo "=== GATE A pkgutil EXPAND ==="
+            pkgutil --expand /tmp/malicious_r37.xar "$PDIR/out" 2>&1; PE=$?
+            echo "pkgutil exit: $PE"
+
+            echo "=== pkgutil dir ==="
+            ls -laR "$PDIR/"
+
+            echo "=== CANARY SEARCH ==="
+            find /tmp /private/tmp -name "xar_gated_canary_macos.txt" 2>/dev/null | head -10 || echo "(not found)"
+
+            if [ -f "$CANARY" ]; then
+              echo "PRESENT: $(cat $CANARY)"; echo "GATE_A_PKGUTIL=PASS"; echo "PASS" > "$GR"
+            else
+              echo "ABSENT"; echo "GATE_A_PKGUTIL=FAIL"
+            fi
+            rm -f "$CANARY"; rm -rf "$PDIR"
+          } 2>&1 | tee "$LOG"
+          RES="$(cat "$GR")"; rm -f "$GR"
+          [ "$RES" = "PASS" ] || { echo "Step failing: GATE_A_PKGUTIL=FAIL"; exit 1; }
+
+      - name: Collect and push results
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo "=== RUN 37 RESULTS — Slash-in-name + Gate A (macos-26) ==="
+            echo "date: $(date)"
+            echo "macos_version: $(sw_vers -productVersion)"
+            echo "macos_build: $(sw_vers -buildVersion)"
+            echo "xar_binary: $(ls -la /usr/bin/xar)"
+            echo "libxar: $(otool -L /usr/bin/xar | grep libxar)"
+            echo "archive_sha256: ${{ env.archive_sha256 }}"
+            echo ""
+            echo "--- XAR TOC ---"
+            /usr/bin/xar -tv /tmp/malicious_r37.xar 2>&1 || echo "(failed)"
+            echo ""
+            echo "--- GATE A xar ---"
+            cat /tmp/run37_xar.log 2>/dev/null || echo "(log missing)"
+            echo ""
+            echo "--- GATE A pkgutil ---"
+            cat /tmp/run37_pkgutil.log 2>/dev/null || echo "(log missing)"
+          } > run37_results.log
+          git config user.email "actions@github.com"
+          git config user.name "GitHub Actions"
+          git add run37_results.log
+          git commit -m "Run 37 results — slash-in-name Gate A [ci skip]" || echo "(nothing to commit)"
+          git push || echo "(push failed)"
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run37-slash-in-name-macos26
+          path: run37_results.log
+          retention-days: 90
