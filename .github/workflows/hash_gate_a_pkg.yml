@@ -1,0 +1,29 @@
+name: hash_gate_a_pkg
+on:
+  workflow_dispatch:
+jobs:
+  hash:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build gate_a39.pkg and record SHA-256
+        run: |
+          cc -o build_xar_r39 build_xar_r39.c -lz -framework Security
+          ./build_xar_r39
+          SHA=$(shasum -a 256 gate_a39.pkg | awk '{print $1}')
+          echo "gate_a39_pkg_sha256=$SHA" | tee gate_a39_sha256.txt
+          echo "commit=$(git rev-parse HEAD)" >> gate_a39_sha256.txt
+          echo "runner_image=$ImageVersion" >> gate_a39_sha256.txt
+          echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> gate_a39_sha256.txt
+
+      - name: Commit hash record
+        run: |
+          git add gate_a39_sha256.txt
+          git commit -m "Record SHA-256 of gate_a39.pkg [ci skip]" || true
+          git push "https://${{ secrets.GITHUB_TOKEN }}@github.com/YuvalFradkin1/new2.git" master || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gate-a39-sha256
+          path: gate_a39_sha256.txt
