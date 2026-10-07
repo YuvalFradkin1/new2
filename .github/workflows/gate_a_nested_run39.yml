@@ -12,6 +12,9 @@ jobs:
           cc -o build_xar_r39 build_xar_r39.c -lz -framework Security
           ./build_xar_r39
           file gate_a39.pkg
+          echo "=== GATE_D_SHA256 ==="
+          shasum -a 256 gate_a39.pkg | tee gate_a39_sha256_inline.txt
+          echo "GATE_A39_PKG_SHA256=$(shasum -a 256 gate_a39.pkg | awk "{print \$1}")"
           echo "=== TOC XML ==="
           python3 -c $'import zlib,struct\nf=open("gate_a39.pkg","rb")\nhdr=f.read(28)\ntoc_cz_len=struct.unpack(">Q",hdr[8:16])[0]\ntoc_cz=f.read(toc_cz_len)\nprint(zlib.decompress(toc_cz).decode())'
 
